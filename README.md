@@ -44,6 +44,19 @@ target_controller_type = 7
 
 Set `vid_pids` to the source controller's VID:PID. `target_controller_type` can be set to `6` (HORI NSW-230 Mega39's) or `7` (HORI PS4-161 Future Tone DX). This feature is independent of V2 native IO.
 
+With `enabled = true`, set `vid_pids = []` to remap **every DirectInput joystick/gamepad**, regardless of its VID/PID. A non-empty list remaps only matching controllers; a missing or invalid list does not enable all-controller remapping. Keyboard and mouse devices are not remapped.
+
+For an official arcade controller under Linux/Steam Deck + Proton/Wine:
+
+```toml
+enabled = true
+vid_pids = []
+target_controller_type = 7
+io_enabled = false
+```
+
+The mod still runs as a Windows x64 DLL inside Proton/Wine. This only affects devices reaching the game's DirectInput registration; it does not expose devices hidden by Steam Input or change their button/axis layout. If no DirectInput device appears in the AnySlider log, try disabling Steam Input for this game. `io_exclusive_controller_input = true` with V2 IO enabled still suppresses native controllers instead of remapping them.
+
 ### V2 Native IO
 
 For configuration examples, see [CONFIG.md](CONFIG.md).

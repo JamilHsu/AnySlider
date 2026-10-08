@@ -11,6 +11,7 @@ author = "sam_nya"
 # ============================
 
 # Controllers listed here will be shown to the game as official HORI controllers.
+# Use [] to remap every DirectInput joystick/gamepad.
 # 054C:05C4 is the ViGEm virtual controller.
 vid_pids = ["054C:05C4"]
 

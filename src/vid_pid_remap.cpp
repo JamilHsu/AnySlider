@@ -15,7 +15,7 @@ namespace anyslider
 {
 namespace
 {
-constexpr size_t ProductGuidData1Offset = 0x14;
+static_assert(offsetof(DIDEVICEINSTANCEW, guidProduct) == 0x14);
 constexpr uint16_t HoriVendorId = 0x0F0D;
 constexpr uint16_t HoriMega39sProductId = 0x00FB;
 constexpr uint16_t HoriFutureToneProductId = 0x013C;
@@ -23,6 +23,7 @@ constexpr uint16_t HoriFutureToneProductId = 0x013C;
 using EnumerateAndRegisterDevice = void(__fastcall*)(int64_t, int64_t);
 EnumerateAndRegisterDevice originalEnumerateAndRegisterDevice = nullptr;
 std::vector<uint32_t> configuredSourceVidPids;
+bool remapAllControllers = false;
 int configuredTargetControllerType = 7;
 bool suppressNativeDevices = false;
 SRWLOCK loggedDevicesLock = SRWLOCK_INIT;
@@ -95,8 +96,12 @@ bool LoadConfig()
         }
 
         configuredSourceVidPids.clear();
+        remapAllControllers = false;
         if (const toml::array* vidPids = config["vid_pids"].as_array())
         {
+            // Only an explicitly empty array enables wildcard matching. Missing,
+            // malformed, or entirely invalid lists must not remap every device.
+            remapAllControllers = vidPids->empty();
             for (const auto& node : *vidPids)
             {
                 const auto text = node.value<std::string>();
@@ -135,7 +140,8 @@ void __fastcall EnumerateAndRegisterDeviceHook(int64_t context, int64_t deviceIn
         return;
     }
 
-    auto& productGuidData1 = *reinterpret_cast<uint32_t*>(deviceInstance + ProductGuidData1Offset);
+    auto* instance = reinterpret_cast<DIDEVICEINSTANCEW*>(deviceInstance);
+    auto& productGuidData1 = instance->guidProduct.Data1;
     const uint32_t sourceVidPid = productGuidData1;
     if (suppressNativeDevices)
     {
@@ -144,7 +150,11 @@ void __fastcall EnumerateAndRegisterDeviceHook(int64_t context, int64_t deviceIn
     }
     // Registration creates the native controller binding metadata. Exclusive
     // input is enforced later in PollState and state aggregation.
-    const bool remapped = IsConfiguredSource(sourceVidPid);
+    const BYTE deviceType = GET_DIDEVICE_TYPE(instance->dwDevType);
+    const bool isController = deviceType == DI8DEVTYPE_JOYSTICK ||
+        deviceType == DI8DEVTYPE_GAMEPAD;
+    const bool remapped = isController &&
+        (remapAllControllers || IsConfiguredSource(sourceVidPid));
     LogDeviceOnce(sourceVidPid, remapped, false);
     if (remapped)
     {
@@ -193,7 +203,8 @@ bool InitializeVidPidRemap(bool suppressDevices)
     {
         return false;
     }
-    Log("Initialized selective VID/PID remapping hook.");
+    Log("Initialized %s VID/PID remapping hook.",
+        remapAllControllers ? "all-controller" : "selective");
     return true;
 }
 }

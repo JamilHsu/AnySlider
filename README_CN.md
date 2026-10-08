@@ -46,6 +46,19 @@ target_controller_type = 7
 
 `vid_pids` 设置源控制器的 VID:PID。`target_controller_type` 可设置为 `6`（HORI NSW-230 Mega39's）或 `7`（HORI PS4-161 Future Tone DX）。这部分功能与 V2 原生 IO 相互独立。
 
+当 `enabled = true` 时，设置 `vid_pids = []` 即可将**所有 DirectInput 摇杆/手柄**模拟为指定类型，不再限制 VID/PID。非空数组仍然只匹配名单中的控制器；缺少配置或无效列表不会开启全匹配。键盘、鼠标不会被重映射。
+
+Linux/Steam Deck + Proton/Wine 下使用官方手台时可以配置：
+
+```toml
+enabled = true
+vid_pids = []
+target_controller_type = 7
+io_enabled = false
+```
+
+Mod 仍然以 Windows x64 DLL 在 Proton/Wine 内运行。此功能只处理进入游戏 DirectInput 注册流程的设备，不会让被 Steam Input 隐藏的设备重新出现，也不会改变按钮/轴布局。如果 AnySlider 日志完全没有 DirectInput 设备记录，可以尝试关闭该游戏的 Steam Input。启用 V2 IO 且设置 `io_exclusive_controller_input = true` 时，仍优先屏蔽原生控制器，而不是重映射。
+
 ### V2 原生 IO
 
 配置例子请阅读 [CONFIG.md](CONFIG.md)
