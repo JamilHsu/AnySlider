@@ -44,6 +44,7 @@ jobs:
 
           $packageFiles = @(
             "config.toml",
+            "config_cn.toml",
             "CONFIG.md",
             "CONFIG_CN.md",
             "LICENSE",
@@ -58,6 +59,24 @@ jobs:
 
           Get-Item $dll | Format-List Name, Length, LastWriteTime
 
+      - name: Build TouchscreenConnect
+        shell: pwsh
+        run: |
+          msbuild tools/touchscreen-connect/TouchscreenConnect.vcxproj /m:1 /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v145 /p:OutDir="$env:GITHUB_WORKSPACE\touchscreen-artifact\\"
+          if ($LASTEXITCODE -ne 0) { throw "TouchscreenConnect build failed" }
+          Copy-Item tools/touchscreen-connect/README.md touchscreen-artifact/README.md
+          Copy-Item LICENSE touchscreen-artifact/LICENSE
+          & ./touchscreen-artifact/TouchscreenConnect.exe --help
+          if ($LASTEXITCODE -ne 0) { throw "TouchscreenConnect help failed" }
+
+      - name: Upload TouchscreenConnect
+        uses: actions/upload-artifact@v4
+        with:
+          name: TouchscreenConnect-${{ github.ref_name }}-${{ github.sha }}
+          path: touchscreen-artifact/
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Upload AnySlider.dll
         uses: actions/upload-artifact@v4
         with:
@@ -65,6 +84,7 @@ jobs:
           path: |
             artifact/AnySlider.dll
             artifact/config.toml
+            artifact/config_cn.toml
             artifact/CONFIG.md
             artifact/CONFIG_CN.md
             artifact/LICENSE

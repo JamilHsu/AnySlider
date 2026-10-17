@@ -1,11 +1,14 @@
 #include "pch.h"
 
 #include "mm_io_keyboard.h"
+#include "mm_io_io3_wiring.h"
+#include <bit>
 #include "mm_io_raw_input.h"
 
 #include "mm_io_shared_memory.h"
 #include "mm_io_window_hooks.h"
 #include "anyslider_log.h"
+#include "mm_input_diagnostics.h"
 
 #include <algorithm>
 #include <cmath>
@@ -37,13 +40,18 @@ bool IsDown(const MmIoRawKeyboardSnapshot& snapshot, const MmIoKeyBinding& bindi
 void DebugLogPressedKeys(
     const MmIoRawKeyboardSnapshot& snapshot,
     const MmIoKeyBinding& binding,
-    const char* name)
+    const char* name, uint32_t bit = UINT32_MAX)
 {
     for (const int key : binding)
     {
         if (WasPressed(snapshot, key))
         {
-            DebugLog("Keyboard press: action=%s vk=%d", name, key);
+            if (InputDiagnosticsEnabled())
+                DebugLog("InputDiag frame=%llu source-press binding=%s bit=%u source=%s code=%d code-hex=%X",
+                    inputDiagnosticFrame, name, bit, key >= MmIoIo3KeyBase ? "IO3" : "Keyboard", key, key);
+            else
+                DebugLog("Bound input press: binding=%s bit=%u source=%s code=%d",
+                    name, bit, key >= MmIoIo3KeyBase ? "IO3" : "Keyboard", key);
         }
     }
 }
@@ -60,9 +68,9 @@ int64_t SelectMouseAxis(const MmIoRawMouseDelta& delta, MmIoMouseAxis axis)
 }
 }
 
-MmIoKeyboardBindings DefaultMmIoKeyboardBindings()
+MmIoInputBindings DefaultMmIoInputBindings()
 {
-    MmIoKeyboardBindings bindings;
+    MmIoInputBindings bindings;
     bindings.test = { VK_F1 };
     bindings.service = { VK_F2 };
     bindings.pause = { VK_ESCAPE };
@@ -81,13 +89,21 @@ MmIoKeyboardBindings DefaultMmIoKeyboardBindings()
     bindings.slider_1_right = { 'E' };
     bindings.slider_2_left = { 'U' };
     bindings.slider_2_right = { 'O' };
+    const auto key = [](uint16_t mask) { return MmIoIo3KeyBase + std::countr_zero(mask); };
+    bindings.test.push_back(key(jvs_switch::Test));
+    bindings.service.push_back(key(jvs_switch::Service));
+    bindings.pause.push_back(key(jvs_switch::Start));
+    bindings.triangle.push_back(key(jvs_switch::Triangle));
+    bindings.square.push_back(key(jvs_switch::Square));
+    bindings.cross.push_back(key(jvs_switch::Cross));
+    bindings.circle.push_back(key(jvs_switch::Circle));
     return bindings;
 }
 
-void MmIoKeyboardMouseFrontend::Initialize(
+void MmIoBoundInputFrontend::Initialize(
     bool enabled,
     float sliderCellsPerSecond,
-    const MmIoKeyboardBindings& bindings,
+    const MmIoInputBindings& bindings,
     const MmIoMouseSliderConfig& mouseSliderConfig,
     MmIoSliderMode sliderMode)
 {
@@ -99,7 +115,6 @@ void MmIoKeyboardMouseFrontend::Initialize(
     mouse_slider_enabled_ = enabled && mouseSliderConfig.enabled;
     last_poll_time_ = {};
     has_last_poll_time_ = false;
-    logical_buttons_ = {};
     ResetMmIoRawMouseInput();
     left_contact_ = {};
     left_contact_.movement.position = 7.5f;
@@ -109,22 +124,22 @@ void MmIoKeyboardMouseFrontend::Initialize(
     debug_right_arcade_cell_ = -1;
 }
 
-bool MmIoKeyboardMouseFrontend::IsEnabled() const
+bool MmIoBoundInputFrontend::IsEnabled() const
 {
     return enabled_;
 }
 
-bool MmIoKeyboardMouseFrontend::IsMouseSliderEnabled() const
+bool MmIoBoundInputFrontend::IsMouseSliderEnabled() const
 {
     return mouse_slider_enabled_;
 }
 
-void MmIoKeyboardMouseFrontend::DisableMouseSlider()
+void MmIoBoundInputFrontend::DisableMouseSlider()
 {
     mouse_slider_enabled_ = false;
 }
 
-void MmIoKeyboardMouseFrontend::UpdateContact(
+void MmIoBoundInputFrontend::UpdateContact(
     SliderContact& contact,
     const MmIoRawKeyboardSnapshot& keyboard,
     const MmIoKeyBinding& leftBinding,
@@ -147,7 +162,7 @@ void MmIoKeyboardMouseFrontend::UpdateContact(
         endPosition);
 }
 
-void MmIoKeyboardMouseFrontend::UpdateMouseContact(
+void MmIoBoundInputFrontend::UpdateMouseContact(
     SliderContact& contact,
     int64_t rawDelta,
     const MmIoMouseSliderBinding& binding,
@@ -175,7 +190,7 @@ void MmIoKeyboardMouseFrontend::UpdateMouseContact(
         contact.movement.position, startPosition, endPosition);
 }
 
-void MmIoKeyboardMouseFrontend::UpdateMouseContactRelease(
+void MmIoBoundInputFrontend::UpdateMouseContactRelease(
     SliderContact& contact,
     bool movedThisPoll,
     std::chrono::steady_clock::time_point now)
@@ -193,12 +208,15 @@ void MmIoKeyboardMouseFrontend::UpdateMouseContactRelease(
     }
 }
 
-MmIoKeyboardFrame MmIoKeyboardMouseFrontend::Poll()
+MmIoKeyboardFrame MmIoBoundInputFrontend::Poll(uint16_t io3Down, uint16_t io3Pressed, bool io3Connected)
 {
     MmIoKeyboardFrame frame{};
     mmio::InputSnapshot& snapshot = frame.snapshot;
-    if (!enabled_)
+    if (!enabled_ && !io3Connected && !io3Pressed)
     {
+        left_contact_ = {};
+        right_contact_ = {};
+        has_last_poll_time_ = false;
         return frame;
     }
 
@@ -208,7 +226,11 @@ MmIoKeyboardFrame MmIoKeyboardMouseFrontend::Poll()
         : 0.0f;
     last_poll_time_ = now;
     has_last_poll_time_ = true;
-    const auto keyboard = ConsumeMmIoRawKeyboardSnapshot();
+    auto keyboard = enabled_ ? ConsumeMmIoRawKeyboardSnapshot() : MmIoRawKeyboardSnapshot{};
+    for (unsigned bit = 0; bit < 16; ++bit) {
+        keyboard.down[MmIoIo3KeyBase + bit] = ((io3Down | io3Pressed) & (1u << bit)) != 0;
+        keyboard.pressed[MmIoIo3KeyBase + bit] = (io3Pressed & (1u << bit)) != 0;
+    }
     DebugLogPressedKeys(keyboard, bindings_.slider_1_left, "Slider1Left");
     DebugLogPressedKeys(keyboard, bindings_.slider_1_right, "Slider1Right");
     DebugLogPressedKeys(keyboard, bindings_.slider_2_left, "Slider2Left");
@@ -251,7 +273,7 @@ MmIoKeyboardFrame MmIoKeyboardMouseFrontend::Poll()
             !mouse_slider_enabled_);
     }
 
-    const auto mouseDelta = ConsumeMmIoRawMouseDelta();
+    const auto mouseDelta = enabled_ ? ConsumeMmIoRawMouseDelta() : MmIoRawMouseDelta{};
     if (mouseDelta.x != 0 || mouseDelta.y != 0 || mouseDelta.wheel != 0)
     {
         DebugLog("Mouse slider delta: x=%lld y=%lld wheel=%lld",
@@ -297,42 +319,9 @@ MmIoKeyboardFrame MmIoKeyboardMouseFrontend::Poll()
     for (size_t index = 0; index < std::size(bindings); ++index)
     {
         const Binding& binding = bindings[index];
-        auto& state = logical_buttons_[index];
-        int newest_pressed_key = -1;
-        for (const int key : *binding.keys)
-        {
-            if (WasPressed(keyboard, key))
-            {
-                newest_pressed_key = key;
-                DebugLog(
-                    "Keyboard press: action=%s vk=%d",
-                    binding.name,
-                    key);
-            }
-        }
-
-        if (newest_pressed_key >= 0 && newest_pressed_key != state.active_key)
-        {
-            // Transfer ownership and expose one UP poll so the game sees a new press edge.
-            state.active_key = newest_pressed_key;
-            state.retrigger = state.down;
-        }
-
-        const bool active_down = IsDown(keyboard, state.active_key);
-        if (state.retrigger)
-        {
-            state.retrigger = false;
-            state.down = false;
-        }
-        else
-        {
-            state.down = active_down;
-            if (!active_down)
-            {
-                state.active_key = -1;
-            }
-        }
-        if (state.down)
+        const bool down = IsDown(keyboard, *binding.keys);
+        DebugLogPressedKeys(keyboard, *binding.keys, binding.name, binding.action);
+        if (down)
         {
             mmio::SetGameButton(snapshot.gamebtn, binding.action);
         }

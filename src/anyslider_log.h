@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
+#include <mutex>
 
 namespace anyslider
 {
@@ -20,10 +21,61 @@ inline bool IsDebugLoggingEnabled()
 
 inline void LogV(const char* prefix, const char* format, va_list args)
 {
+    // Serialize whole records across game, device and diagnostic threads.
+    static std::mutex mutex;
+    std::lock_guard lock(mutex);
+    va_list copy;
+    va_copy(copy, args);
     std::fputs(prefix, stdout);
-    std::vfprintf(stdout, format, args);
+    std::vfprintf(stdout, format, copy);
+    va_end(copy);
     std::fputc('\n', stdout);
     std::fflush(stdout);
+
+    struct LogFile
+    {
+        FILE* handle = nullptr;
+
+        LogFile()
+        {
+            // 打开失败仍保留stdout日志；不要在日志初始化中递归记录错误。
+            // 固定路径和模式不涉及外部缓冲区；保留标准fopen的行为和可移植性。
+            // 仅此调用忽略微软CRT弃用提示，不隐藏其他调用的潜在问题。
+#if defined(_MSC_VER) && defined(_WIN32)
+#pragma warning(push)
+#pragma warning(disable: 4996)
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+#endif
+            handle = std::fopen("anyslider.log", "a");
+#if defined(_MSC_VER) && defined(_WIN32)
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+#pragma warning(pop)
+#endif
+        }
+
+        ~LogFile()
+        {
+            if (handle)
+            {
+                std::fclose(handle);
+            }
+        }
+    };
+    static LogFile file;
+    if (file.handle)
+    {
+        va_copy(copy, args);
+        std::fputs(prefix, file.handle);
+        std::vfprintf(file.handle, format, copy);
+        va_end(copy);
+        std::fputc('\n', file.handle);
+        std::fflush(file.handle);
+    }
 }
 
 inline void Log(const char* format, ...)

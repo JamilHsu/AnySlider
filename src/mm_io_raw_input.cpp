@@ -3,6 +3,7 @@
 #include "mm_io_raw_input.h"
 
 #include "anyslider_log.h"
+#include "mm_input_diagnostics.h"
 
 #include <algorithm>
 #include <array>
@@ -133,6 +134,10 @@ void ProcessMmIoRawInput(HRAWINPUT rawInput)
         if (key.VKey < raw_keyboard_down.size())
         {
             const bool down = (key.Flags & RI_KEY_BREAK) == 0;
+            const bool previous = raw_keyboard_down[key.VKey].load(std::memory_order_relaxed);
+            if (InputDiagnosticsEnabled() && previous != down)
+                DebugLog("InputDiag raw-key thread=%lu device=%p vk=%u scan=%u flags=%X down=%d",
+                    GetCurrentThreadId(), input.header.hDevice, key.VKey, key.MakeCode, key.Flags, down);
             raw_keyboard_down[key.VKey].store(down, std::memory_order_relaxed);
             if (down)
             {
@@ -203,11 +208,15 @@ DWORD WINAPI RawInputThreadProc(LPVOID)
     {
         Log("Could not create Raw Input window: %lu", GetLastError());
         SignalRawInputReady(false);
+        UnregisterClassW(kRawInputWindowClass, instance);
         return 0;
     }
     if (!RegisterMmIoRawInput(raw_input_window, raw_input_include_mouse))
     {
         SignalRawInputReady(false);
+        DestroyWindow(raw_input_window);
+        raw_input_window = nullptr;
+        UnregisterClassW(kRawInputWindowClass, instance);
         return 0;
     }
 
@@ -227,14 +236,27 @@ DWORD WINAPI RawInputThreadProc(LPVOID)
     {
         removeDevices[1] = removeDevices[0];
         removeDevices[1].usUsage = 0x02;
-        RegisterRawInputDevices(removeDevices, 2, sizeof(RAWINPUTDEVICE));
     }
-    else
+    // Unregister only usages still targeting our window; preserve replacements.
+    UINT registeredCount = 0;
+    if (GetRegisteredRawInputDevices(nullptr, &registeredCount, sizeof(RAWINPUTDEVICE)) == 0)
     {
-        RegisterRawInputDevices(removeDevices, 1, sizeof(RAWINPUTDEVICE));
+        std::vector<RAWINPUTDEVICE> registered(registeredCount);
+        if (registeredCount && GetRegisteredRawInputDevices(registered.data(), &registeredCount,
+                sizeof(RAWINPUTDEVICE)) != static_cast<UINT>(-1))
+        {
+            for (const auto& device : registered)
+            {
+                if (device.hwndTarget != raw_input_window || device.usUsagePage != 1) continue;
+                for (UINT i = 0; i < (raw_input_include_mouse ? 2u : 1u); ++i)
+                    if (device.usUsage == removeDevices[i].usUsage)
+                        RegisterRawInputDevices(&removeDevices[i], 1, sizeof(RAWINPUTDEVICE));
+            }
+        }
     }
     DestroyWindow(raw_input_window);
     raw_input_window = nullptr;
+    UnregisterClassW(kRawInputWindowClass, instance);
     raw_input_ready.store(false, std::memory_order_release);
     return 0;
 }
@@ -288,7 +310,12 @@ void ShutdownMmIoRawInput()
     {
         PostThreadMessageW(threadId, WM_QUIT, 0, 0);
     }
-    WaitForSingleObject(thread, 5000);
+    const DWORD waitResult = WaitForSingleObject(thread, 5000);
+    if (waitResult != WAIT_OBJECT_0)
+    {
+        Log("Raw Input shutdown incomplete: wait=%lu; thread/event retained for retry", waitResult);
+        return;
+    }
     CloseHandle(thread);
     raw_input_thread = nullptr;
     if (raw_input_ready_event)
@@ -336,7 +363,10 @@ bool InitializeMmIoRawKeyboard()
 MmIoRawKeyboardSnapshot ConsumeMmIoRawKeyboardSnapshot()
 {
     MmIoRawKeyboardSnapshot snapshot;
-    for (size_t key = 0; key < snapshot.down.size(); ++key)
+    // The unified snapshot also has 16 IO3 slots; raw VK storage has only 256.
+    // Leave IO3 slots zero here; the bound frontend fills them separately.
+    static_assert(std::tuple_size_v<decltype(snapshot.down)> >= std::tuple_size_v<decltype(raw_keyboard_down)>);
+    for (size_t key = 0; key < raw_keyboard_down.size(); ++key)
     {
         snapshot.down[key] = raw_keyboard_down[key].load(std::memory_order_relaxed);
         snapshot.pressed[key] = raw_keyboard_pressed[key].exchange(false, std::memory_order_relaxed);

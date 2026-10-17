@@ -8,8 +8,8 @@ namespace anyslider
 {
 struct MmIoRawKeyboardSnapshot
 {
-    std::array<bool, 256> down{};
-    std::array<bool, 256> pressed{};
+    std::array<bool, MmIoBindingKeyCount> down{};
+    std::array<bool, MmIoBindingKeyCount> pressed{};
 };
 
 bool InitializeMmIoRawInput(

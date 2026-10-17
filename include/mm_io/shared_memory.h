@@ -15,14 +15,14 @@
 //   3. Commit the slot by setting InputSlot::sequence.
 //   4. Publish it by updating SharedBuffer::input_sequence.
 //
-// sequence is simply 1, 2, 3... There is no odd/even state.
+// Input sequence is 1, 2, 3... Output uses an odd/even commit sequence.
 
 namespace anyslider::mmio
 {
     inline constexpr wchar_t kSharedMemoryName[] = L"Local\\MMIO_SHARED_BUFFER";
 
     inline constexpr uint32_t kMagic = 0x4F494D4D; // "MMIO"
-    inline constexpr uint16_t kAbiMajor = 2;
+    inline constexpr uint16_t kAbiMajor = 3;
     inline constexpr uint16_t kAbiMinor = 0;
 
     inline constexpr uint32_t kTouchCellCount = 32;
@@ -185,6 +185,28 @@ namespace anyslider::mmio
     };
 
 
+    enum class Io3Led : uint32_t
+    {
+        Triangle = 1u << 3,
+        Cross = 1u << 4,
+        Square = 1u << 6,
+        Circle = 1u << 7,
+        LeftRed = 1u << 8,
+        LeftGreen = 1u << 9,
+        LeftBlue = 1u << 10,
+        RightRed = 1u << 11,
+        RightGreen = 1u << 12,
+        RightBlue = 1u << 13,
+    };
+
+    struct alignas(8) LedOutput
+    {
+        uint64_t timestamp_ms; // GetTickCount64, complete snapshot publication time.
+        uint32_t io3_bitmap;   // Native cabinet logical outputs; not JVS wire bytes.
+        uint8_t slider[97];    // Command 02 payload: 0x3F + 32 BRG triplets (0..254).
+        uint8_t reserved[3];   // Must be zero. No channel conversion or reversal.
+    };
+
     struct alignas(8) SharedBuffer
     {
         uint32_t magic;
@@ -202,6 +224,11 @@ namespace anyslider::mmio
 
         Endpoint producer;
         Endpoint hook;
+
+        // Single hook-side writer. 0 unavailable, odd writing, even committed.
+        // Unlike input_sequence, output_sequence advances by 2 per snapshot.
+        volatile int64_t output_sequence;
+        LedOutput output;
     };
 
 
@@ -225,6 +252,13 @@ namespace anyslider::mmio
     static_assert(offsetof(SharedBuffer, input_sequence) == 16);
     static_assert(offsetof(SharedBuffer, inputs) == 24);
     static_assert(offsetof(Endpoint, game_state) == 32);
-    static_assert(sizeof(SharedBuffer) == 6248);
+    static_assert(sizeof(LedOutput) == 112);
+    static_assert(alignof(LedOutput) == 8);
+    static_assert(offsetof(LedOutput, io3_bitmap) == 8);
+    static_assert(offsetof(LedOutput, slider) == 12);
+    static_assert(offsetof(LedOutput, reserved) == 109);
+    static_assert(offsetof(SharedBuffer, output_sequence) == 6248);
+    static_assert(offsetof(SharedBuffer, output) == 6256);
+    static_assert(sizeof(SharedBuffer) == 6368);
 
 }

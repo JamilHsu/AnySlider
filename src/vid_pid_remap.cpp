@@ -183,7 +183,7 @@ bool InstallHook()
     if (error == NO_ERROR)
     {
         error = DetourAttach(reinterpret_cast<void**>(&originalEnumerateAndRegisterDevice),
-            EnumerateAndRegisterDeviceHook);
+            reinterpret_cast<void*>(EnumerateAndRegisterDeviceHook));
     }
     if (error == NO_ERROR) error = DetourTransactionCommit();
     else DetourTransactionAbort();

@@ -33,6 +33,7 @@
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\masm.props" />
   </ImportGroup>
   <ImportGroup Label="Shared">
   </ImportGroup>
@@ -45,7 +46,7 @@
   <PropertyGroup Label="UserMacros" />
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir);$(ProjectDir)Dependencies\JoyShockLibrary\JoyShockLibrary;$(ProjectDir)Dependencies\hidapi\hidapi;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir);$(ProjectDir)Dependencies\JoyShockLibrary\JoyShockLibrary;$(ProjectDir)Dependencies\hidapi\hidapi;$(ProjectDir)Dependencies\Detours\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -101,6 +102,18 @@
     <ClInclude Include="pch.h" />
     <ClInclude Include="include\mm_io\shared_memory.h" />
     <ClInclude Include="src\anyslider_log.h" />
+    <ClInclude Include="src\hook_validation.h" />
+    <ClInclude Include="src\mm_input_diagnostics.h" />
+    <ClInclude Include="src\mm_device_binding.h" />
+    <ClInclude Include="src\mm_ui_input.h" />
+    <ClInclude Include="src\mm_ui_aet.h" />
+    <ClInclude Include="src\mm_ui_input_policy.h" />
+    <ClInclude Include="src\mm_ui_input_wrapper.h" />
+    <ClInclude Include="src\mm_pointer_merge_policy.h" />
+    <ClInclude Include="src\mm_io_arcade_slider.h" />
+    <ClInclude Include="src\mm_io_io3.h" />
+    <ClInclude Include="src\mm_io_io3_wiring.h" />
+    <ClInclude Include="src\mm_io_jvs.h" />
     <ClInclude Include="src\mm_io_config.h" />
     <ClInclude Include="src\mm_game_state.h" />
     <ClInclude Include="src\mm_io_hooks.h" />
@@ -109,20 +122,44 @@
     <ClInclude Include="src\mm_io_raw_input.h" />
     <ClInclude Include="src\mm_io_shared_memory.h" />
     <ClInclude Include="src\mm_io_slider.h" />
+    <ClInclude Include="src\arcade_overlapped_io.h" />
+    <ClInclude Include="src\arcade_eeprom.h" />
+    <ClInclude Include="src\mm_io_touchscreen.h" />
+    <ClInclude Include="src\mm_io_touchscreen_protocol.h" />
+    <ClInclude Include="src\mm_io_touchscreen_test_hooks.h" />
+    <ClInclude Include="src\touchscreen_mapping.h" />
     <ClInclude Include="src\mm_io_window_hooks.h" />
     <ClInclude Include="src\vid_pid_remap.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="mod.cpp" />
+    <ClCompile Include="src\mm_io_arcade_slider.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="src\mm_io_slider_protocol.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="src\mm_led_hooks.cpp" />
+    <ClCompile Include="src\mm_led_diagnostics.cpp" />
+    <ClCompile Include="src\mm_arcade_led.cpp" />
+    <ClInclude Include="src\mm_arcade_led.h" />
+    <ClCompile Include="src\mm_arcade_test_mode.cpp" />
+    <ClInclude Include="src\mm_arcade_test_mode.h" />
+    <ClInclude Include="src\mm_led_diagnostics.h" />
+    <ClInclude Include="src\mm_led_hooks.h" />
+    <ClInclude Include="include\mm_io\led_output.h" />
+    <ClCompile Include="src\mm_io_io3.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="src\mm_io_jvs.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="src\mm_io_config.cpp" />
     <ClCompile Include="src\mm_game_state.cpp" />
+    <ClCompile Include="src\mm_ui_input.cpp" />
+    <ClCompile Include="src\mm_ui_aet.cpp" />
     <ClCompile Include="src\mm_io_hooks.cpp" />
     <ClCompile Include="src\mm_io_joyshock.cpp" />
     <ClCompile Include="src\mm_io_keyboard.cpp" />
     <ClCompile Include="src\mm_io_raw_input.cpp" />
     <ClCompile Include="src\mm_io_shared_memory.cpp" />
     <ClCompile Include="src\mm_io_slider.cpp" />
+    <ClCompile Include="src\arcade_eeprom.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="src\mm_io_touchscreen.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="src\mm_io_touchscreen_test_hooks.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="src\mm_io_window_hooks.cpp" />
     <ClCompile Include="src\vid_pid_remap.cpp" />
     <ClCompile Include="Dependencies\JoyShockLibrary\JoyShockLibrary\JoyShockLibrary.cpp">
@@ -139,9 +176,13 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
+    <MASM Include="src\mm_arcade_query_bridge.asm" />
+  </ItemGroup>
+  <ItemGroup>
     <None Include="config.toml" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\masm.targets" />
   </ImportGroup>
 </Project>

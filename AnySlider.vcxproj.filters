@@ -18,6 +18,10 @@
     <ClInclude Include="Dependencies\Signature.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="src\mm_ui_input.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="src\mm_ui_input_policy.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="src\mm_ui_input_wrapper.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="src\hook_validation.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="pch.h">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -27,6 +31,11 @@
     <ClInclude Include="src\anyslider_log.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="src\mm_io_arcade_slider.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="src\mm_io_io3.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="src\mm_io_io3_wiring.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="src\mm_io_jvs.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="src\mm_led_diagnostics.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="src\mm_io_config.h">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -42,6 +51,12 @@
     <ClInclude Include="src\mm_io_shared_memory.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="src\arcade_overlapped_io.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="src\arcade_eeprom.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="src\mm_io_touchscreen.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="src\mm_io_touchscreen_protocol.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="src\mm_io_touchscreen_test_hooks.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="src\touchscreen_mapping.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="src\mm_io_window_hooks.h">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -68,12 +83,21 @@
     <ClCompile Include="mod.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="src\mm_io_arcade_slider.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\mm_io_slider_protocol.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\mm_led_hooks.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\mm_led_diagnostics.cpp"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="src\mm_arcade_led.cpp"><Filter>源文件</Filter></ClCompile>
+    <ClInclude Include="src\mm_arcade_led.h"><Filter>头文件</Filter></ClInclude>
+    <ClCompile Include="src\mm_io_io3.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\mm_io_jvs.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="src\mm_io_config.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="src\mm_game_state.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="src\mm_ui_input.cpp"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="src\mm_io_hooks.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -83,6 +107,9 @@
     <ClCompile Include="src\mm_io_shared_memory.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="src\arcade_eeprom.cpp"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="src\mm_io_touchscreen.cpp"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="src\mm_io_touchscreen_test_hooks.cpp"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="src\mm_io_window_hooks.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -106,6 +133,14 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
+    <MASM Include="src\mm_arcade_query_bridge.asm"><Filter>源文件</Filter></MASM>
+  </ItemGroup>
+  <ItemGroup>
     <None Include="config.toml" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\mm_pointer_merge_policy.h"><Filter>头文件</Filter></ClInclude>
+    <ClCompile Include="src\mm_arcade_test_mode.cpp"><Filter>源文件</Filter></ClCompile>
+    <ClInclude Include="src\mm_arcade_test_mode.h"><Filter>头文件</Filter></ClInclude>
   </ItemGroup>
 </Project>

@@ -8384,7 +8384,7 @@ TOML_NAMESPACE_START
 		TOML_ABI_NAMESPACE_BOOL(TOML_EXCEPTIONS, lit_ex, lit_noex);
 
 		TOML_NODISCARD
-		inline parse_result operator"" _toml(const char* str, size_t len)
+		inline parse_result operator""_toml(const char* str, size_t len)
 		{
 			return parse(std::string_view{ str, len });
 		}
@@ -8392,7 +8392,7 @@ TOML_NAMESPACE_START
 #if TOML_HAS_CHAR8
 
 		TOML_NODISCARD
-		inline parse_result operator"" _toml(const char8_t* str, size_t len)
+		inline parse_result operator""_toml(const char8_t* str, size_t len)
 		{
 			return parse(std::u8string_view{ str, len });
 		}

@@ -2,7 +2,15 @@
 
 #include "mm_io_config.h"
 
+// 上游C++ API使用extern "C"返回结构体；保留其ABI，只局部忽略Clang的C兼容性提示。
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wreturn-type-c-linkage"
+#endif
 #include "Dependencies/JoyShockLibrary/JoyShockLibrary/JoyShockLibrary.h"
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 #include <atomic>
 #include <chrono>

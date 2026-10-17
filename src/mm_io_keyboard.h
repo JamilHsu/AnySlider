@@ -12,6 +12,9 @@
 namespace anyslider
 {
 struct MmIoRawKeyboardSnapshot;
+// 键盘 VK: 0..255；IO3 开关编号: 256..271（不是游戏 action）。
+inline constexpr int MmIoIo3KeyBase = 256;
+inline constexpr size_t MmIoBindingKeyCount = 272;
 using MmIoKeyBinding = std::vector<int>;
 
 struct MmIoKeyboardFrame
@@ -21,7 +24,7 @@ struct MmIoKeyboardFrame
     uint32_t slider_direction = 0;
 };
 
-struct MmIoKeyboardBindings
+struct MmIoInputBindings
 {
     MmIoKeyBinding test;
     MmIoKeyBinding service;
@@ -80,21 +83,21 @@ struct MmIoRawMouseDelta
     int64_t wheel = 0;
 };
 
-MmIoKeyboardBindings DefaultMmIoKeyboardBindings();
+MmIoInputBindings DefaultMmIoInputBindings();
 
-class MmIoKeyboardMouseFrontend
+class MmIoBoundInputFrontend
 {
 public:
     void Initialize(
         bool enabled,
         float sliderCellsPerSecond,
-        const MmIoKeyboardBindings& bindings,
+        const MmIoInputBindings& bindings,
         const MmIoMouseSliderConfig& mouseSliderConfig,
         MmIoSliderMode sliderMode);
     [[nodiscard]] bool IsEnabled() const;
     [[nodiscard]] bool IsMouseSliderEnabled() const;
     void DisableMouseSlider();
-    MmIoKeyboardFrame Poll();
+    MmIoKeyboardFrame Poll(uint16_t io3Down = 0, uint16_t io3Pressed = 0, bool io3Connected = false);
 
 private:
     struct SliderContact
@@ -109,7 +112,7 @@ private:
     float slider_cells_per_second_ = 18.0f;
     std::chrono::steady_clock::time_point last_poll_time_{};
     bool has_last_poll_time_ = false;
-    MmIoKeyboardBindings bindings_;
+    MmIoInputBindings bindings_;
     MmIoMouseSliderConfig mouse_slider_;
     bool mouse_slider_enabled_ = false;
     MmIoSliderMode slider_mode_ = MmIoSliderMode::Arcade;
@@ -117,15 +120,6 @@ private:
     int debug_right_arcade_cell_ = -1;
     SliderContact left_contact_{};
     SliderContact right_contact_{};
-    struct LogicalButtonState
-    {
-        int active_key = -1;
-        bool down = false;
-        bool retrigger = false;
-    };
-
-    std::array<LogicalButtonState, 19> logical_buttons_{};
-
     void UpdateContact(
         SliderContact& contact,
         const MmIoRawKeyboardSnapshot& keyboard,

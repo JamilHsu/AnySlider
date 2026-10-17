@@ -1,0 +1,202 @@
+enabled = true
+dll = ["AnySlider.dll"]
+name = "AnySlider"
+description = "Allows any controllers to use Mega Mix+'s native arcade slider."
+version = "2.0"
+author = "sam_nya"
+
+# 指定模拟为HORI手台的设备VID PID，留空则把所有设备当作HORI手台
+# 054C:05C4 是常见虚拟手柄驱动 ViGEm 的VID PID.
+vid_pids = ["054C:05C4"]
+# 映射设备目标
+# 6 = HORI NSW-230 Mega39's, 7 = HORI PS4-161 Future Tone DX.
+target_controller_type = 7
+
+# ============================
+# AnySlider IO
+# ============================
+
+# IO总开关
+io_enabled = false
+# 调试开关
+debug = false
+# 外部共享内存输入名
+io_shared_memory = "Local\\MMIO_SHARED_BUFFER"
+# 共享内存输入有效期，超时释放
+io_max_input_lease_ms = 500
+# 独占游戏输入（开启后屏蔽游戏原本的输入逻辑，只由mod提供输入）
+io_exclusive_controller_input = false
+# 让游戏不在前台时保持运行
+io_keep_game_active_unfocused = false
+
+# ============================
+# 通用输入设置
+# ============================
+
+# IO模拟的设备类型
+# -1=自动 (默认DualSense，自动切换任天堂布局).
+# 2=DS4, 3=DualSense, 4=Nintendo, 5=Xbox, 6=HORI Mega39s, 7=HORI Future Tone.
+io_controller_type = -1
+# 键盘LR、手柄左右摇杆的滑条模式：
+# "arcade" 将键盘/手柄方向模拟在滑条上滑动（比如向右代表模拟从触摸区域左往右滑动）
+# "joystick" 将键盘/手柄方向映射到游戏内置的左右输入。
+io_slider_mode = "arcade"
+# Arcade 模式下滑条模拟速度，单位为 cell/秒。
+# 只对左右输入有效，对直接 32-cell 输入和 mouse_as_slider 模式无效
+io_arcade_slider_emu_cells_per_second = 32.0
+# 游戏菜单使用○确认/×返回
+io_use_ps_circle_confirm = false
+# 调换UI按键图例，需要开启O键确认才有效。（如果出现UI问题或者Mods冲突可以关闭）
+io_swap_ox_sprite = true
+# 在手柄接入时保持鼠标输入
+io_show_mouse_with_controller = true
+
+# ============================
+# 键鼠输入设置（使用AnySlider代替游戏内置键鼠输入）
+# ============================
+
+# 内置键盘/鼠标前端，游戏会将其作为手柄输入处理
+io_keyboard_mouse_frontend = false
+# 屏蔽游戏自身的键盘/鼠标输入，避免产生重复输入
+io_block_keyboard_input = false
+io_block_mouse_input = false
+
+# 使用鼠标输入来作为滑条使用，比如有两个旋钮的手台
+io_use_mouse_as_slider = false
+# 绑定的鼠标移动轴，一般分配到"x"或"y"，也可以是"wheel"滚轮
+# 注：slider_1是左半边，slider_2是右半边的slider区域
+io_mouse_slider_1_axis = "x"
+io_mouse_slider_2_axis = "y"
+# 是否开启方向反转
+io_mouse_slider_1_invert = false
+io_mouse_slider_2_invert = false
+# 鼠标灵敏度
+io_mouse_slider_1_sensitivity = 1.0
+io_mouse_slider_2_sensitivity = 1.0
+# 停止移动多久后当作松开触摸
+io_mouse_slider_touch_hold_ms = 20
+# 指定鼠标设备的VID PID，留空就是所有鼠标
+io_mouse_slider_device = ""
+
+# ============================
+# 手柄输入设置（使用AnySlider代替游戏内置手柄输入）
+# ============================
+
+# 手柄前端，支持 DS4、DualSense、Pro Controller 和 Joy-Con
+io_gamepad_frontend = false
+# 自动识别手柄类型
+io_gamepad_device = "auto"
+# 使用DS4/DualSense的触摸板作为滑条输入
+io_gamepad_touchpad_slider = true
+# 触控板左右反向
+io_gamepad_touchpad_invert = false
+# 摇杆死区，范围为 0.1 到 0.95。
+io_gamepad_stick_slider_deadzone = 0.5
+
+# ============================
+# 街机IO设置
+# 分为IO3(+AMEX)、Slider、触屏三个部分
+# ============================
+
+# === IO3设置 ===
+# 开启IO3连接（需要AMEX板）
+io_io3_backend = false
+# 拉取输入之间的等待时间，一般不用改
+io_io3_poll_interval_ms = 4
+# AMEX超时时间
+io_io3_timeout_ms = 1000
+# 按键灯效跟随真实顺序，而不跟随游戏内按键绑定
+io_io3_led_use_hardware_position = true
+
+# === 街机Slider ===
+# 开启街机滑条连接
+io_arcade_slider_backend = false
+# 街机滑条端口，默认COM11
+io_arcade_slider_port = "COM11"
+# 部分USB转串口需要发送DTR-RTS才能开始通讯，如连接主板原生串口出现问题可以尝试关闭
+io_arcade_slider_dtr_rts = true
+
+# === 街机串口触屏 ===
+# 开启街机触屏 SEGA838-14772 连接（WinTouch触屏不需要）
+io_arcade_touchscreen_backend = false
+# 街机触屏端口，默认COM1
+io_arcade_touchscreen_port = "COM1"
+
+# === 街机灯效 ===
+# 模仿街机版本生成街机灯效
+io_arcade_led = true
+# 使用歌曲加载进度动画
+io_arcade_led_loading_progress = true
+
+# 开启街机TEST MODE菜单
+io_enable_test_mode = false
+
+
+# ============================
+# 按键绑定
+# ============================
+# 统一动作绑定，目前支持：键盘键/VK（如0x41）及IO3_Triangle/Square/Cross/Circle/Start/Service/Test。
+io_key_test = ["F1", "IO3_Test"]
+io_key_service = ["F2", "IO3_Service"]
+io_key_pause = ["Escape", "IO3_Start"]
+io_key_start = ["Enter"]
+io_key_dpad_up = ["Up"]
+io_key_dpad_down = ["Down"]
+io_key_dpad_left = ["Left"]
+io_key_dpad_right = ["Right"]
+io_key_triangle = ["W", "IO3_Triangle"]
+io_key_square = ["A", "IO3_Square"]
+io_key_cross = ["S", "IO3_Cross"]
+io_key_circle = ["D", "IO3_Circle"]
+io_key_l1 = ["Z"]
+io_key_r1 = ["X"]
+io_key_l2 = []
+io_key_r2 = []
+io_key_select = []
+io_key_l3 = []
+io_key_r3 = []
+# 模拟滑条方向的按键
+io_key_slider_1_left = ["Q"]
+io_key_slider_1_right = ["E"]
+io_key_slider_2_left = ["U"]
+io_key_slider_2_right = ["O"]
+# 给滑条区域单独绑定键盘按键
+io_key_slider_01 = []
+io_key_slider_02 = []
+io_key_slider_03 = []
+io_key_slider_04 = []
+io_key_slider_05 = []
+io_key_slider_06 = []
+io_key_slider_07 = []
+io_key_slider_08 = []
+io_key_slider_09 = []
+io_key_slider_10 = []
+io_key_slider_11 = []
+io_key_slider_12 = []
+io_key_slider_13 = []
+io_key_slider_14 = []
+io_key_slider_15 = []
+io_key_slider_16 = []
+io_key_slider_17 = []
+io_key_slider_18 = []
+io_key_slider_19 = []
+io_key_slider_20 = []
+io_key_slider_21 = []
+io_key_slider_22 = []
+io_key_slider_23 = []
+io_key_slider_24 = []
+io_key_slider_25 = []
+io_key_slider_26 = []
+io_key_slider_27 = []
+io_key_slider_28 = []
+io_key_slider_29 = []
+io_key_slider_30 = []
+io_key_slider_31 = []
+io_key_slider_32 = []
+
+
+# === 诊断功能 ===
+io_input_diagnostics = false
+# -1=normal native/slider decision, 0=force non-arcade, 1=force arcade.
+io_input_diagnostics_arcade = -1
+io_led_diagnostics = false

@@ -1,6 +1,15 @@
 #include "pch.h"
 
 #include "mm_io_hooks.h"
+#include "mm_device_binding.h"
+#include "mm_ui_input.h"
+#include "mm_ui_aet.h"
+#include "mm_pointer_merge_policy.h"
+#include "mm_input_diagnostics.h"
+#include <intrin.h>
+#include "mm_led_hooks.h"
+#include "mm_led_diagnostics.h"
+#include "mm_arcade_led.h"
 
 #include "Dependencies/Signature.h"
 #include "anyslider_log.h"
@@ -16,11 +25,13 @@
 #include <cmath>
 #include <cstring>
 
+// The detour entry is implemented in mm_arcade_query_bridge.asm, not C++.
+extern "C" uint32_t IsArcadeControllerEnabledHook();
+
 namespace anyslider
 {
 namespace
 {
-constexpr bool EnableInputCheckActionFallback = true;
 
 constexpr size_t InputTappedButtonsOffset = 0x00;
 constexpr size_t InputReleasedButtonsOffset = 0x18;
@@ -42,14 +53,13 @@ constexpr uint32_t HoriFTDXArcadeControllerType = 7;
 constexpr uint32_t NoControllerType = 11;
 
 using MergeSliderSensorButtons = int64_t(__fastcall*)(void* state, void* sensorState);
-using MergeConnectedDevice = int64_t(__fastcall*)(void* state, void* deviceState, uint32_t playerIndex);
+using MergeConnectedDevice = int64_t(__fastcall*)(void* state, void* deviceState, uint32_t playerIndex, uint8_t primaryContext);
 using MergeSelectedDevice = int64_t(__fastcall*)(void* state, void* deviceState, uint32_t playerIndex, uint32_t* selectedDeviceType);
 using DirectInputDevicePollState = char(__fastcall*)(void* device, void* deviceState);
 using ResetInputState = int64_t(__fastcall*)(void* state);
 using InputConfigGetDeviceActionBinding = uint32_t(__fastcall*)(uint32_t action, uint32_t deviceIndex);
-using InputActionPredicate = int64_t(__fastcall*)(void* state, uint64_t action);
-using InputCheckAction = char(__fastcall*)(void* state, uint64_t action, InputActionPredicate predicate);
-using IsArcadeControllerEnabled = bool(__fastcall*)();
+using GetActionBinding = uint32_t*(__fastcall*)(void*, uint32_t*, uint32_t);
+using IsArcadeControllerEnabled = uint32_t(__fastcall*)();
 
 MergeSliderSensorButtons originalMergeSliderSensorButtons = nullptr;
 MergeConnectedDevice originalMergeConnectedDevice = nullptr;
@@ -57,13 +67,24 @@ MergeSelectedDevice originalMergeSelectedDevice = nullptr;
 DirectInputDevicePollState originalDirectInputDevicePollState = nullptr;
 ResetInputState resetInputState = nullptr;
 InputConfigGetDeviceActionBinding originalInputConfigGetDeviceActionBinding = nullptr;
-InputCheckAction originalInputCheckAction = nullptr;
+GetActionBinding originalGetActionBinding = nullptr;
 IsArcadeControllerEnabled originalIsArcadeControllerEnabled = nullptr;
 
+using MouseDeviceGateFn = int64_t(__fastcall*)(uint8_t);
+MouseDeviceGateFn originalMouseDeviceGate = nullptr;
+bool mouseDeviceGateInstalled = false;
 MmIoConfig mmIoConfig;
+int64_t __fastcall MouseDeviceGateHook(uint8_t enabled)
+{
+    // Preserve scene +1920 and explicit mouse-block policy. Do not change identity.
+    return originalMouseDeviceGate(mmIoConfig.show_mouse_with_controller &&
+        !mmIoConfig.block_mouse_input ? 1 : enabled);
+}
 MmIoConsumer mmIoConsumer;
-MmIoKeyboardMouseFrontend keyboardFrontend;
+MmIoBoundInputFrontend keyboardFrontend;
 MmIoJoyShockFrontend joyShockFrontend;
+MmIoIo3Frontend io3Frontend;
+MmIoArcadeSliderFrontend arcadeSliderFrontend;
 MmIoSliderModeResolver sliderModeResolver;
 std::atomic_bool arcadeSliderActive = false;
 std::atomic_bool exclusiveControllerActive = false;
@@ -73,7 +94,6 @@ bool selectedDeviceHookInstalled = false;
 bool exclusiveControllerHooksInstalled = false;
 bool directInputHooksInstalled = false;
 bool inputConfigBindingFallbackHookInstalled = false;
-bool inputCheckActionHookInstalled = false;
 bool arcadeControllerHookInstalled = false;
 thread_local bool debugSliderStateInitialized = false;
 thread_local MmIoSliderMode debugLastSliderMode = MmIoSliderMode::Arcade;
@@ -89,10 +109,6 @@ thread_local bool debugSharedMemorySnapshotInitialized = false;
 thread_local uint32_t debugLastSharedMemoryMode = 0;
 thread_local uint32_t debugLastSharedMemoryTouchMask = 0;
 thread_local uint64_t debugLastSharedMemoryButtons[mmio::kGameButtonWordCount]{};
-thread_local bool debugLogicalActionInitialized = false;
-thread_local uint32_t debugLastLogicalAction = 0;
-thread_local uint32_t debugLastLogicalRawAction = 0;
-thread_local bool debugLastLogicalResult = false;
 
 struct AcceptedInputFrame
 {
@@ -295,66 +311,6 @@ uint32_t MapTouchCells(const uint8_t* touchCells)
     return result;
 }
 
-uint32_t MapGamepadLogicalAction(uint64_t action)
-{
-    switch (action)
-    {
-    // 游戏菜单的垂直 action 顺序与 shared-memory ABI 的名称相反。
-    case mmio::DpadUp: return 25;
-    case mmio::DpadDown: return 24;
-    case mmio::DpadLeft: return 26;
-    case mmio::DpadRight: return 27;
-    default: return UINT32_MAX;
-    }
-}
-
-// PS布局
-uint32_t MapDualSenseBindingIndex(uint32_t action)
-{
-    switch (action)
-    {
-    case 3: return 0; // D-pad Up
-    case 4: return 2; // D-pad Down
-    case 5: return 1; // D-pad Left
-    case 6: return 3; // D-pad Right
-    case 7: return 5; // Square / Xbox X
-    case 8: return 4; // Triangle / Xbox Y
-    case 9: return 7; // Circle / Xbox B
-    case 10: return 6; // Cross / Xbox A
-    case 11: return 8; // L1 / LB
-    case 12: return 9; // R1 / RB
-    case 13: return 10; // L2 / LT
-    case 14: return 11; // R2 / RT
-    case 15: return 12; // Select / Share
-    case 16: return 13; // L3 / left-stick click
-    case 17: return 14; // R3 / right-stick click
-    case 160: return 15; // Pause / Options
-    default: return UINT32_MAX;
-    }
-}
-
-// 任天堂布局
-uint32_t MapNintendoBindingIndex(uint32_t action)
-{
-    switch (action)
-    {
-    case 7: return 4; // Square / Xbox X / Nintendo X
-    case 8: return 5; // Triangle / Xbox Y / Nintendo Y
-    case 9: return 6; // Circle / Xbox B / Nintendo B
-    case 10: return 7; // Cross / Xbox A / Nintendo A
-    default: return MapDualSenseBindingIndex(action);
-    }
-}
-
-uint32_t MapControllerBindingIndex(
-    MmIoControllerType controllerType,
-    uint32_t action)
-{
-    return controllerType == MmIoControllerType::Nintendo
-        ? MapNintendoBindingIndex(action)
-        : MapDualSenseBindingIndex(action);
-}
-
 uint32_t NativeControllerType(MmIoControllerType controllerType)
 {
     switch (controllerType)
@@ -366,15 +322,6 @@ uint32_t NativeControllerType(MmIoControllerType controllerType)
     default:
         return DualSenseControllerType;
     }
-}
-
-MmIoControllerType ControllerLayoutFromNativeType(uint32_t controllerType)
-{
-    return controllerType == NintendoControllerType
-        ? MmIoControllerType::Nintendo
-        : controllerType == DualShock4ControllerType
-            ? MmIoControllerType::DualShock4
-            : MmIoControllerType::DualSense;
 }
 
 const char* SliderModeName(MmIoSliderMode mode)
@@ -489,15 +436,18 @@ void DebugLogSharedMemorySnapshot(const MmIoConsumer::InputFrame& frame)
 
 void RefreshAcceptedInputFrame()
 {
+    if (InputDiagnosticsEnabled()) ++inputDiagnosticFrame;
     MmIoConsumer::InputFrame externalFrame{};
     const bool externalFrameAvailable = mmIoConsumer.ReadFrame(
         externalFrame, mmIoConfig.max_input_lease_ms);
     const bool externalActive = externalFrame.source_active;
-    const MmIoKeyboardFrame keyboardFrame = keyboardFrontend.Poll();
+    const auto io3Frame = io3Frontend.Consume();
+    const MmIoKeyboardFrame keyboardFrame = keyboardFrontend.Poll(
+        io3Frame.binding_switches, io3Frame.pressed_switches, io3Frame.connected);
     const mmio::InputSnapshot& keyboardSnapshot = keyboardFrame.snapshot;
     uint8_t keyboardTouchCells[mmio::kTouchCellCount]{};
     ExpandTouchMask(keyboardSnapshot.touch_mask, keyboardTouchCells);
-    const bool keyboardActive = keyboardFrontend.IsEnabled();
+    const bool keyboardActive = keyboardFrontend.IsEnabled() || io3Frame.connected || io3Frame.pressed_switches != 0;
     MmIoJoyShockFrame controllerFrame{};
     bool controllerInputActive = false;
     bool controllerTakeoverActive = false;
@@ -508,11 +458,10 @@ void RefreshAcceptedInputFrame()
         controllerTakeoverActive =
             mmIoConfig.exclusive_controller_input && controllerInputActive;
     }
-    virtualControllerType.store(
-        controllerInputActive
-            ? NativeControllerType(controllerFrame.controller_type)
-            : DualSenseControllerType,
-        std::memory_order_release);
+    const uint32_t reportedType = mmIoConfig.controller_type != -1
+        ? static_cast<uint32_t>(mmIoConfig.controller_type)
+        : controllerInputActive ? NativeControllerType(controllerFrame.controller_type) : DualSenseControllerType;
+    virtualControllerType.store(reportedType, std::memory_order_release);
 
     // 上一帧模拟过轴时，即使本帧没有新 flick，也要写回零轴。
     const bool clearSimulatedAxes = acceptedInputFrame.simulated_axes;
@@ -552,7 +501,11 @@ void RefreshAcceptedInputFrame()
     }
     else
     {
-        keyboardButtonEdges.Reset();
+        uint64_t empty[mmio::kGameButtonWordCount]{}, tapped[mmio::kGameButtonWordCount]{},
+            released[mmio::kGameButtonWordCount]{}, held[mmio::kGameButtonWordCount]{};
+        keyboardButtonEdges.Apply(empty, tapped, released, held);
+        MergeGameButtons(acceptedInputFrame.gamebtn_released, released);
+        for (const auto word : released) acceptedInputFrame.active |= word != 0;
     }
 
     if (controllerInputActive)
@@ -604,7 +557,9 @@ void RefreshAcceptedInputFrame()
         HasMmIoSliderTouch(keyboardFrame.direct_touch_cells);
     const bool controllerDirectTouchActive =
         controllerInputActive && HasMmIoSliderTouch(controllerFrame.touch_cells);
-    const bool directSliderTouchActive = externalArcadeActive || keyboardDirectTouchActive || controllerDirectTouchActive;
+    const auto arcadeSliderFrame = arcadeSliderFrontend.Consume();
+    const bool cabinetTouchActive = HasMmIoSliderTouch(arcadeSliderFrame.touch_cells);
+    const bool directSliderTouchActive = externalArcadeActive || keyboardDirectTouchActive || controllerDirectTouchActive || cabinetTouchActive;
     acceptedInputFrame.direct_slider_touch_active = directSliderTouchActive;
     const bool frontendDirectionActive =
         (keyboardActive && keyboardFrame.slider_direction != 0) ||
@@ -612,6 +567,7 @@ void RefreshAcceptedInputFrame()
     const uint32_t directionHeld = externalGamepadSlide |
         (keyboardActive ? keyboardFrame.slider_direction : 0) |
         (controllerInputActive ? controllerFrame.gamepad_slide : 0);
+    acceptedInputFrame.active = acceptedInputFrame.active || arcadeSliderFrame.connected;
     const bool preserveExternalGamepad = externalGamepadSlide != 0 && !directSliderTouchActive && !frontendDirectionActive;
     const MmIoSliderMode effectiveSliderMode = preserveExternalGamepad
         ? MmIoSliderMode::Joystick
@@ -670,6 +626,7 @@ void RefreshAcceptedInputFrame()
                 acceptedInputFrame.touch_cells,
                 controllerFrame.arcade_touch_cells);
         }
+        MergeTouchCells(acceptedInputFrame.touch_cells, arcadeSliderFrame.touch_cells);
         acceptedInputFrame.slider_mode = mmio::Mode::ArcadeSlider;
         acceptedInputFrame.gamepad_slide = 0;
         acceptedInputFrame.active = acceptedInputFrame.active ||
@@ -707,6 +664,21 @@ void RefreshAcceptedInputFrame()
         gamepadDirectionEdges.Reset();
     }
 
+    if (InputDiagnosticsEnabled())
+    {
+        bool edge = false;
+        for (uint32_t word = 0; word < mmio::kGameButtonWordCount; ++word)
+            edge |= (acceptedInputFrame.gamebtn_tapped[word] | acceptedInputFrame.gamebtn_released[word]) != 0;
+        if (edge)
+        {
+            inputDiagnosticWindowEnd = inputDiagnosticFrame + 3;
+            inputDiagnosticRecordCount = 0;
+            for (uint32_t word = 0; word < mmio::kGameButtonWordCount; ++word)
+                DebugLog("InputDiag frame=%llu merged word=%u tapped=%016llX held=%016llX released=%016llX",
+                    inputDiagnosticFrame, word, acceptedInputFrame.gamebtn_tapped[word],
+                    acceptedInputFrame.gamebtn_down[word], acceptedInputFrame.gamebtn_released[word]);
+        }
+    }
     acceptedInputFrame.ui_activity_pending = HasPrimaryButtonTap(
         acceptedInputFrame.gamebtn_tapped);
     acceptedInputFrame.exclusive =
@@ -796,12 +768,18 @@ void InjectAcceptedInput(void* state)
     auto* analog = reinterpret_cast<uint32_t*>(
         static_cast<uint8_t*>(state) + InputAnalogOffset);
 
+    if (InputDiagnosticRecord())
+        DebugLog("InputDiag frame=%llu inject-before state=%p face-tapped=%llX face-held=%llX face-released=%llX",
+            inputDiagnosticFrame, state, tappedButtons[0] & 0x780ull, heldButtons[0] & 0x780ull, releasedButtons[0] & 0x780ull);
     for (uint32_t word = 0; word < mmio::kGameButtonWordCount; ++word)
     {
         tappedButtons[word] |= acceptedInputFrame.gamebtn_tapped[word];
         releasedButtons[word] |= acceptedInputFrame.gamebtn_released[word];
         heldButtons[word] |= acceptedInputFrame.gamebtn_down[word];
     }
+    if (InputDiagnosticRecord())
+        DebugLog("InputDiag frame=%llu inject-after state=%p face-tapped=%llX face-held=%llX face-released=%llX",
+            inputDiagnosticFrame, state, tappedButtons[0] & 0x780ull, heldButtons[0] & 0x780ull, releasedButtons[0] & 0x780ull);
     if (acceptedInputFrame.slider_mode == mmio::Mode::ArcadeSlider)
     {
         const uint32_t touchMask = MapTouchCells(acceptedInputFrame.touch_cells);
@@ -845,6 +823,22 @@ void InjectAcceptedInput(void* state)
     InjectAcceptedGamepadAxes(state);
 }
 
+uintptr_t InputCallerRva(void* caller)
+{
+    return reinterpret_cast<uintptr_t>(caller) - reinterpret_cast<uintptr_t>(getModuleInfo().lpBaseOfDll);
+}
+
+void ObserveUiAction(void* state, uint64_t action, ui_input::Predicate predicate,
+    uint32_t result, uintptr_t caller)
+{
+    if (!predicate || action < 7 || action > 10 || !InputDiagnosticWindow()) return;
+    if (InputDiagnosticRecord())
+        DebugLog("InputDiag frame=%llu query caller=+%llX state=%p action=%llu predicate=+%llX arcade=%d result=%d native-predicate=unchanged",
+            inputDiagnosticFrame, static_cast<unsigned long long>(caller), state, action,
+            static_cast<unsigned long long>(InputCallerRva(reinterpret_cast<void*>(predicate))),
+            inputDiagnosticArcade, result);
+}
+
 // 让游戏显示的图例和实际一致
 uint32_t __fastcall InputConfigGetDeviceActionBindingHook(
     uint32_t action,
@@ -852,69 +846,32 @@ uint32_t __fastcall InputConfigGetDeviceActionBindingHook(
 {
     const uint32_t result = originalInputConfigGetDeviceActionBinding(
         action, deviceIndex);
-    if (result != UINT32_MAX || deviceIndex != 0 || !mmIoConfig.enabled)
+    const uint32_t finalBinding = mmIoConfig.enabled
+        ? ResolveVirtualDeviceBinding(virtualControllerType.load(std::memory_order_acquire), action, deviceIndex, result)
+        : result;
+    if (InputDiagnosticsEnabled() && action >= 7 && action <= 10 && deviceIndex == 0)
     {
-        return result;
+        struct BindingRecord { uint32_t original = 0; uint32_t finalValue = 0; uint32_t type = 0; bool seen = false; };
+        static thread_local BindingRecord records[4];
+        auto& record = records[action - 7];
+        const uint32_t type = virtualControllerType.load(std::memory_order_acquire);
+        if (!record.seen || record.original != result || record.finalValue != finalBinding || record.type != type)
+        {
+            DebugLog("InputDiag frame=%llu binding caller=+%llX action=%u device=%u original=%u final=%u virtual-type=%u policy=missing-only",
+                inputDiagnosticFrame, static_cast<unsigned long long>(InputCallerRva(_ReturnAddress())),
+                action, deviceIndex, result, finalBinding, type);
+            record = {result, finalBinding, type, true};
+        }
     }
-
-    return MapControllerBindingIndex(
-        ControllerLayoutFromNativeType(
-            virtualControllerType.load(std::memory_order_acquire)),
-        action);
+    return finalBinding;
 }
 
-// 目前UI菜单会用
-char __fastcall InputCheckActionHook(
-    void* state,
-    uint64_t action,
-    InputActionPredicate predicate)
+uint32_t* __fastcall MenuPromptBindingHook(void* state, uint32_t* output, uint32_t action)
 {
-    char result = originalInputCheckAction(state, action, predicate);
-    if (!acceptedInputFrame.active ||
-        acceptedInputFrame.slider_mode == mmio::Mode::ArcadeSlider)
-    {
-        debugLogicalActionInitialized = false;
-        return result;
-    }
-
-    const uint32_t rawAction = MapGamepadLogicalAction(action);
-    if (rawAction == UINT32_MAX)
-    {
-        return result;
-    }
-
-    const char rawResult = predicate ? static_cast<char>(predicate(state, rawAction)) : 0;
-    if (!IsDebugLoggingEnabled())
-    {
-        debugLogicalActionInitialized = false;
-        return static_cast<char>(result || rawResult);
-    }
-    const uint64_t heldWord = state
-        ? *reinterpret_cast<const uint64_t*>(static_cast<const uint8_t*>(state) + InputHeldButtonsOffset)
-        : 0;
-    const uint64_t repeatWord = state
-        ? *reinterpret_cast<const uint64_t*>(static_cast<const uint8_t*>(state) + 0x90)
-        : 0;
-    result = static_cast<char>(result || rawResult);
-    if (false && (!debugLogicalActionInitialized ||
-        debugLastLogicalAction != action ||
-        debugLastLogicalRawAction != rawAction ||
-        debugLastLogicalResult != (result != 0)))
-    {
-        DebugLog(
-            "Logical action shim: action=%llu raw-axis-action=%u predicate=%p held0=0x%016llX repeat0=0x%016llX raw-result=%s result=%s",
-            action,
-            rawAction,
-            reinterpret_cast<const void*>(predicate),
-            heldWord,
-            repeatWord,
-            rawResult ? "true" : "false",
-            result ? "true" : "false");
-    }
-    debugLogicalActionInitialized = true;
-    debugLastLogicalAction = static_cast<uint32_t>(action);
-    debugLastLogicalRawAction = rawAction;
-    debugLastLogicalResult = result != 0;
+    auto* result = originalGetActionBinding(state, output, action);
+    if (action >= 7 && action <= 10 && output && InputDiagnosticRecord())
+        DebugLog("InputDiag frame=%llu resolved-binding caller=+%llX state=%p action=%u binding=%u",
+            inputDiagnosticFrame, static_cast<unsigned long long>(InputCallerRva(_ReturnAddress())), state, action, *output);
     return result;
 }
 
@@ -932,13 +889,36 @@ int64_t __fastcall MergeSliderSensorButtonsHook(void* state, void* sensorState)
     return result;
 }
 
-int64_t __fastcall MergeConnectedDeviceHook(void* state, void* deviceState, uint32_t playerIndex)
+int64_t __fastcall MergeConnectedDeviceHook(
+    void* state, void* deviceState, uint32_t playerIndex, uint8_t primaryContext)
 {
-    if (mmIoConfig.exclusive_controller_input)
+    if (!mmIoConfig.exclusive_controller_input)
+        return originalMergeConnectedDevice(state, deviceState, playerIndex, primaryContext);
+
+    const bool allowPointer = mmIoConfig.touchscreen.enabled ||
+        (mmIoConfig.show_mouse_with_controller && !mmIoConfig.block_mouse_input);
+    if (!allowPointer || playerIndex != 0 || !primaryContext) return 0;
+
+    // Sample native keyboard/mouse into an isolated player-shaped buffer.
+    // Only pointer channels enter the unified IO state; native keyboard actions,
+    // any-key synthesis and device identity never escape this buffer.
+    alignas(16) uint8_t pointerState[PointerPlayerStateSize]{};
+    originalMergeConnectedDevice(pointerState, deviceState, playerIndex, primaryContext);
+    const bool active = MergeExclusivePointerState(state, pointerState);
+    if (InputDiagnosticsEnabled() && active && InputDiagnosticRecord())
     {
-        return 0;
+        uint64_t tapped = 0, held = 0, released = 0;
+        int32_t x = 0, y = 0;
+        std::memcpy(&tapped, pointerState + 0x10, 8);
+        std::memcpy(&released, pointerState + 0x28, 8);
+        std::memcpy(&held, pointerState + 0x40, 8);
+        std::memcpy(&x, pointerState + PointerAnalogOffset, 4);
+        std::memcpy(&y, pointerState + PointerAnalogOffset + sizeof(x), 4);
+        DebugLog("PointerMerge exclusive=1 raw145 tap=%d held=%d release=%d xy=%d,%d identity=virtual",
+            !!(tapped & PointerLeftButtonMask), !!(held & PointerLeftButtonMask),
+            !!(released & PointerLeftButtonMask), x, y);
     }
-    return originalMergeConnectedDevice(state, deviceState, playerIndex);
+    return active ? 1 : 0;
 }
 
 char __fastcall DirectInputDevicePollStateHook(void* device, void* deviceState)
@@ -1000,6 +980,20 @@ int64_t __fastcall MergeSelectedDeviceHook(
         useVirtualController = true;
     }
 
+    if (playerIndex == 0 && InputDiagnosticsEnabled())
+    {
+        const uint32_t effectiveType = useVirtualController
+            ? virtualControllerType.load(std::memory_order_acquire) : nativeType;
+        static thread_local uint32_t lastNative = UINT32_MAX, lastEffective = UINT32_MAX;
+        if (lastNative != nativeType || lastEffective != effectiveType || InputDiagnosticWindow())
+        {
+            if (lastNative != nativeType || lastEffective != effectiveType || InputDiagnosticRecord())
+                DebugLog("InputDiag frame=%llu device native-type=%u native-result=%lld effective-type=%u exclusive=%d virtual-active=%d state-type=%u",
+                    inputDiagnosticFrame, nativeType, result, effectiveType, mmIoConfig.exclusive_controller_input,
+                    acceptedInputFrame.active, *reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(state) + 0x2E8));
+            lastNative = nativeType; lastEffective = effectiveType;
+        }
+    }
     if (playerIndex == 0 && useVirtualController)
     {
         const uint32_t controllerType = virtualControllerType.load(std::memory_order_acquire);
@@ -1017,10 +1011,53 @@ int64_t __fastcall MergeSelectedDeviceHook(
     return result;
 }
 
-bool __fastcall IsArcadeControllerEnabledHook()
+// Only called behind the register-preserving assembly entry.
+uint32_t EvaluateArcadeControllerEnabled()
 {
-    return originalIsArcadeControllerEnabled() ||
-        arcadeSliderActive.load(std::memory_order_relaxed);
+    const bool native = originalIsArcadeControllerEnabled();
+    const bool slider = arcadeSliderActive.load(std::memory_order_relaxed);
+    const bool effective = InputDiagnosticsEnabled() && mmIoConfig.input_diagnostics_arcade != -1
+        ? mmIoConfig.input_diagnostics_arcade != 0 : native || slider;
+    if (InputDiagnosticsEnabled())
+    {
+        static thread_local int lastNative = -1, lastEffective = -1, lastSlider = -1;
+        inputDiagnosticArcade = effective;
+        if (lastNative != static_cast<int>(native) ||
+            lastEffective != static_cast<int>(effective) ||
+            lastSlider != static_cast<int>(slider))
+        {
+            DebugLog("InputDiag frame=%llu arcade native=%d slider=%d effective=%d override=%d",
+                inputDiagnosticFrame, native, slider, effective, mmIoConfig.input_diagnostics_arcade);
+            lastNative = native; lastEffective = effective; lastSlider = slider;
+        }
+    }
+    return effective ? 1u : 0u;
+}
+
+bool PrepareMenuPromptHook()
+{
+    if (!InputDiagnosticsEnabled())
+        return true;
+    const auto& module = getModuleInfo();
+    const auto* base = static_cast<const uint8_t*>(module.lpBaseOfDll);
+    constexpr uint8_t getter[] = {0x48,0x83,0xEC,0x38,0x45,0x8B,0xC8,0x4C,0x8D,0x81,0xF0,0x02,0x00,0x00};
+    if (module.SizeOfImage != 0x23E73000)
+        return false;
+    bool valid = std::memcmp(base + 0x2AAF30, getter, sizeof(getter)) == 0;
+    for (const uintptr_t rva : {0x60924B, 0x609454, 0x60A97F})
+    {
+        int32_t displacement = 0;
+        std::memcpy(&displacement, base + rva + 1, sizeof(displacement));
+        valid = valid && base[rva] == 0xE8 &&
+            static_cast<int64_t>(rva + 5) + displacement == 0x2AAF30;
+    }
+    if (!valid)
+    {
+        return false;
+    }
+    originalGetActionBinding = reinterpret_cast<GetActionBinding>(
+        const_cast<uint8_t*>(base) + 0x2AAF30);
+    return true;
 }
 
 bool InstallDetours()
@@ -1040,9 +1077,6 @@ bool InstallDetours()
     constexpr char inputConfigBindingBytes[] =
         "\x48\x83\x3D\x00\x00\x00\x00\x00\x74\x00\x44\x8B\xC2\x8B\xD1\xE9\x00\x00\x00\x00\xB8\xFF\xFF\xFF\xFF\xC3";
     constexpr char inputConfigBindingMask[] = "xxx????xx?xxxxxx????xxxxxx";
-    constexpr char inputCheckActionBytes[] =
-        "\x40\x55\x41\x56\x48\x83\xEC\x38\x4D\x8B\xF0\x48\x8B\xE9\x4D\x85\xC0\x75";
-    constexpr char inputCheckActionMask[] = "xxxxxxxxxxxxxxxxxx";
     constexpr char selectedMergeBytes[] =
         "\x48\x89\x5C\x24\x00\x48\x89\x74\x24\x00\x48\x89\x7C\x24\x00\x41\x56\x48\x83\xEC\x20\x48\x8B\xFA";
     constexpr char selectedMergeMask[] = "xxxx?xxxx?xxxx?xxxxxxxxx";
@@ -1051,7 +1085,6 @@ bool InstallDetours()
     constexpr char arcadeMask[] = "xxxxx????xxx";
     const bool installSelectedDeviceHook = true;
     const bool installInputConfigBindingFallbackHook = true;
-    const bool installInputCheckActionHook = EnableInputCheckActionFallback;
     // Shared-memory producers may publish ArcadeSlider without a built-in frontend.
     const bool installArcadeControllerHook = true;
 
@@ -1063,11 +1096,6 @@ bool InstallDetours()
             reinterpret_cast<InputConfigGetDeviceActionBinding>(
                 FindSignature(inputConfigBindingBytes, inputConfigBindingMask));
     }
-    if (installInputCheckActionHook)
-    {
-        originalInputCheckAction = reinterpret_cast<InputCheckAction>(
-            FindSignature(inputCheckActionBytes, inputCheckActionMask));
-    }
     if (installArcadeControllerHook)
     {
         originalIsArcadeControllerEnabled = reinterpret_cast<IsArcadeControllerEnabled>(
@@ -1076,7 +1104,6 @@ bool InstallDetours()
     if (!originalMergeSliderSensorButtons ||
         (installInputConfigBindingFallbackHook &&
             !originalInputConfigGetDeviceActionBinding) ||
-        (installInputCheckActionHook && !originalInputCheckAction) ||
         (installArcadeControllerHook && !originalIsArcadeControllerEnabled))
     {
         Log("MMIO core input signatures were not found; slider=%s binding-fallback=%s action-query=%s arcade-query=%s; no MMIO hooks were installed.",
@@ -1084,9 +1111,7 @@ bool InstallDetours()
             installInputConfigBindingFallbackHook
                 ? (originalInputConfigGetDeviceActionBinding ? "ok" : "missing")
                 : "disabled",
-            installInputCheckActionHook
-                ? (originalInputCheckAction ? "ok" : "missing")
-                : "disabled",
+            "separate-ui-module",
             originalIsArcadeControllerEnabled ? "ok" : "missing");
         return false;
     }
@@ -1118,52 +1143,71 @@ bool InstallDetours()
         }
     }
 
-    LONG error = DetourTransactionBegin();
-    if (error == NO_ERROR)
+    originalMouseDeviceGate = nullptr;
+    if (mmIoConfig.show_mouse_with_controller)
     {
-        error = DetourUpdateThread(GetCurrentThread());
+        const MODULEINFO& module = getModuleInfo();
+        constexpr uint8_t gateBytes[] = {0x48,0x83,0x3d,0xa0,0x70,0xe9,0x00,0x00,0x74,0x08,0x0f,0xb6,0xd1};
+        if (module.SizeOfImage != 0x23E73000 ||
+            std::memcmp(static_cast<uint8_t*>(module.lpBaseOfDll) + 0x2B1140,
+                gateBytes, sizeof(gateBytes)) != 0)
+        {
+            Log("Optional mouse/controller gate: unsupported build; mouse override disabled; core IO unchanged.");
+        }
+        else
+        {
+            originalMouseDeviceGate = reinterpret_cast<MouseDeviceGateFn>(
+                static_cast<uint8_t*>(module.lpBaseOfDll) + 0x2B1140);
+        }
     }
+    // Isolation build: diagnostics must not detour the shared binding getter.
+    // Keep action tracing and menu policy unchanged to isolate this observer.
+    originalGetActionBinding = nullptr;
+    if (InputDiagnosticsEnabled())
+        Log("Input diagnostics isolation: shared binding/prompt observer NOT installed.");
+
+    LONG error = DetourTransactionBegin();
+    if (error != NO_ERROR)
+    {
+        Log("Could not begin MMIO installation: %ld", error);
+        return false;
+    }
+    error = DetourUpdateThread(GetCurrentThread());
     if (error == NO_ERROR)
     {
         error = DetourAttach(
             reinterpret_cast<void**>(&originalMergeSliderSensorButtons),
-            MergeSliderSensorButtonsHook);
+            reinterpret_cast<void*>(MergeSliderSensorButtonsHook));
     }
     if (error == NO_ERROR && installInputConfigBindingFallbackHook)
     {
         error = DetourAttach(
             reinterpret_cast<void**>(&originalInputConfigGetDeviceActionBinding),
-            InputConfigGetDeviceActionBindingHook);
-    }
-    if (error == NO_ERROR && installInputCheckActionHook)
-    {
-        error = DetourAttach(
-            reinterpret_cast<void**>(&originalInputCheckAction),
-            InputCheckActionHook);
+            reinterpret_cast<void*>(InputConfigGetDeviceActionBindingHook));
     }
     if (error == NO_ERROR && installSelectedDeviceHook)
     {
         error = DetourAttach(
             reinterpret_cast<void**>(&originalMergeSelectedDevice),
-            MergeSelectedDeviceHook);
+            reinterpret_cast<void*>(MergeSelectedDeviceHook));
     }
     if (error == NO_ERROR && mmIoConfig.exclusive_controller_input)
     {
         error = DetourAttach(
             reinterpret_cast<void**>(&originalMergeConnectedDevice),
-            MergeConnectedDeviceHook);
+            reinterpret_cast<void*>(MergeConnectedDeviceHook));
     }
     if (error == NO_ERROR && mmIoConfig.exclusive_controller_input)
     {
         error = DetourAttach(
             reinterpret_cast<void**>(&originalDirectInputDevicePollState),
-            DirectInputDevicePollStateHook);
+            reinterpret_cast<void*>(DirectInputDevicePollStateHook));
     }
     if (error == NO_ERROR && installArcadeControllerHook)
     {
         error = DetourAttach(
             reinterpret_cast<void**>(&originalIsArcadeControllerEnabled),
-            IsArcadeControllerEnabledHook);
+            reinterpret_cast<void*>(IsArcadeControllerEnabledHook));
     }
     if (error == NO_ERROR)
     {
@@ -1181,31 +1225,78 @@ bool InstallDetours()
     }
 
     installed = true;
+    // Optional hooks each get their own transaction AFTER core installation.
+    // Even attach/commit failure cannot roll back working core input.
+    auto installOptional = [](void** original, void* hook, const char* name) {
+        LONG optionalError = DetourTransactionBegin();
+        if (optionalError != NO_ERROR)
+        {
+            Log("Optional %s transaction unavailable: %ld; core IO unchanged.", name, optionalError);
+            return false;
+        }
+        optionalError = DetourUpdateThread(GetCurrentThread());
+        if (optionalError == NO_ERROR) optionalError = DetourAttach(original, hook);
+        if (optionalError == NO_ERROR) optionalError = DetourTransactionCommit();
+        else DetourTransactionAbort();
+        if (optionalError != NO_ERROR)
+            Log("Optional %s installation failed: %ld; core IO unchanged.", name, optionalError);
+        return optionalError == NO_ERROR;
+    };
+    mouseDeviceGateInstalled = originalMouseDeviceGate && installOptional(
+        reinterpret_cast<void**>(&originalMouseDeviceGate),
+        reinterpret_cast<void*>(MouseDeviceGateHook), "mouse/controller gate");
+    const bool uiPolicyInstalled = ui_input::Install({mmIoConfig.use_ps_circle_confirm,
+        InputDiagnosticsEnabled() ? ObserveUiAction : nullptr});
+    if (!uiPolicyInstalled) {
+        Log("Optional UI input policy unavailable; core IO remains active.");
+        // A rejected migration must not disable independent Action diagnostics.
+        if (!ui_input::IsInstalled() && InputDiagnosticsEnabled())
+            ui_input::Install({false, ObserveUiAction});
+    }
+    if (mmIoConfig.use_ps_circle_confirm && mmIoConfig.swap_ox_sprite &&
+        uiPolicyInstalled && !ui_aet::Install())
+        Log("Optional PS AET replacement unavailable; input policy remains active.");
+    if (originalGetActionBinding && !installOptional(
+        reinterpret_cast<void**>(&originalGetActionBinding),
+        reinterpret_cast<void*>(MenuPromptBindingHook), "binding observer"))
+        originalGetActionBinding = nullptr;
     selectedDeviceHookInstalled = installSelectedDeviceHook;
     arcadeControllerHookInstalled = installArcadeControllerHook;
     exclusiveControllerHooksInstalled = mmIoConfig.exclusive_controller_input;
     directInputHooksInstalled = mmIoConfig.exclusive_controller_input;
     inputConfigBindingFallbackHookInstalled = installInputConfigBindingFallbackHook;
-    inputCheckActionHookInstalled = installInputCheckActionHook;
     return true;
 }
 }
 
+// External C linkage for the MASM bridge; keep this outside the anonymous namespace.
+extern "C" uint32_t IsArcadeControllerEnabledHookImpl()
+{
+    return EvaluateArcadeControllerEnabled();
+}
+
 bool InitializeMmIoHooks(const MmIoConfig& config)
 {
+    if (installed) return true;
     if (!config.enabled)
     {
         return true;
     }
 
     mmIoConfig = config;
-    virtualControllerType.store(DualSenseControllerType, std::memory_order_release);
+    inputDiagnosticsEnabled.store(config.input_diagnostics && IsDebugLoggingEnabled());
+    inputDiagnosticFrame = inputDiagnosticWindowEnd = 0;
+    Log("Input diagnostics=%s type-override=%d arcade-override=%d; binding fallback is always unswapped; action tracing is pass-through",
+        InputDiagnosticsEnabled() ? "on" : "off",
+        config.controller_type, config.input_diagnostics_arcade);
+    const uint32_t initialType = config.controller_type != -1
+        ? static_cast<uint32_t>(config.controller_type) : DualSenseControllerType;
+    virtualControllerType.store(initialType, std::memory_order_release);
     debugSliderStateInitialized = false;
     debugInjectedSliderInitialized = false;
     debugInjectedAxesInitialized = false;
     debugLastInjectedAxesSimulated = false;
     debugSharedMemorySnapshotInitialized = false;
-    debugLogicalActionInitialized = false;
     arcadeSliderSwitchEdges.Reset();
     sliderModeResolver.Initialize(config.slider_mode);
     joyShockFrontend.Initialize(
@@ -1215,7 +1306,7 @@ bool InitializeMmIoHooks(const MmIoConfig& config)
     keyboardFrontend.Initialize(
         config.keyboard_mouse_frontend,
         config.arcade_slider_emu_cells_per_second,
-        config.keyboard_bindings,
+        config.input_bindings,
         config.mouse_slider,
         config.slider_mode);
     if (config.keyboard_mouse_frontend &&
@@ -1232,6 +1323,7 @@ bool InitializeMmIoHooks(const MmIoConfig& config)
             config.max_input_lease_ms))
     {
         joyShockFrontend.Shutdown();
+        ShutdownMmIoRawInput();
         sliderModeResolver.Reset();
         return false;
     }
@@ -1245,9 +1337,24 @@ bool InitializeMmIoHooks(const MmIoConfig& config)
         sliderModeResolver.Reset();
         ShutdownMmGameState();
         mmIoConsumer.Shutdown();
+        ShutdownMmIoRawInput();
         return false;
     }
 
+    if (!InitializeMmLedHooks(config.shared_memory_name, [](const mmio::LedOutput& frame) {
+            io3Frontend.SetLeds(frame.io3_bitmap);
+            arcadeSliderFrontend.SetLeds(frame.slider);
+        }, false)) {
+        Log("LED capture unavailable; Arcade LED restoration skipped; input remains enabled.");
+    } else {
+        InitializeArcadeLed(config.arcade_led, config.io3.led_use_hardware_position
+            ? HardwareLampReader([](uint32_t& held) { return io3Frontend.ReadHardwareLampHeld(held); })
+            : HardwareLampReader{});
+        StartLedDiagnostics(config.led_diagnostics);
+    }
+    arcadeSliderFrontend.Initialize(config.arcade_slider);
+    io3Frontend.Initialize(config.io3);
+    Log("IO3 backend %s (AMEX native driver)", config.io3.enabled ? "enabled" : "disabled");
     Log("MMIO backend ready: mapping=%ls lease=%llu ms exclusive=%s keyboard-mouse=%s mouse-slider=%s gamepad=%s selected-device-hook=%s directinput-poll-hooks=%s binding-fallback-hook=%s action-query-hook=%s arcade-query-hook=%s",
         config.shared_memory_name.c_str(),
         config.max_input_lease_ms,
@@ -1258,13 +1365,53 @@ bool InitializeMmIoHooks(const MmIoConfig& config)
         selectedDeviceHookInstalled ? "true" : "false",
         directInputHooksInstalled ? "true" : "false",
         inputConfigBindingFallbackHookInstalled ? "true" : "false",
-        inputCheckActionHookInstalled ? "true" : "false",
+        ui_input::IsInstalled() ? "true" : "false",
         arcadeControllerHookInstalled ? "true" : "false");
     return true;
 }
 
 void ShutdownMmIoHooks()
 {
+    if (!ui_aet::Uninstall()) {
+        Log("PS AET detach failed; MMIO callbacks/resources retained.");
+        return;
+    }
+    if (!ui_input::Uninstall()) {
+        Log("UI input detach failed; MMIO callbacks/resources retained.");
+        return;
+    }
+    // Detach before shutting down resources used by the input callbacks.
+    // On any failure keep installation flags, trampolines and frontends alive.
+    if (installed)
+    {
+        LONG error = DetourTransactionBegin();
+        if (error != NO_ERROR)
+        {
+            Log("Could not begin MMIO detach: %ld; hooks/resources retained.", error);
+            return;
+        }
+        error = DetourUpdateThread(GetCurrentThread());
+        auto detach = [&error](void** original, void* hook) {
+            if (error == NO_ERROR) error = DetourDetach(original, hook);
+        };
+        detach(reinterpret_cast<void**>(&originalMergeSliderSensorButtons), reinterpret_cast<void*>(MergeSliderSensorButtonsHook));
+        if (mouseDeviceGateInstalled) detach(reinterpret_cast<void**>(&originalMouseDeviceGate), reinterpret_cast<void*>(MouseDeviceGateHook));
+        if (inputConfigBindingFallbackHookInstalled) detach(reinterpret_cast<void**>(&originalInputConfigGetDeviceActionBinding), reinterpret_cast<void*>(InputConfigGetDeviceActionBindingHook));
+        if (originalGetActionBinding) detach(reinterpret_cast<void**>(&originalGetActionBinding), reinterpret_cast<void*>(MenuPromptBindingHook));
+        if (selectedDeviceHookInstalled) detach(reinterpret_cast<void**>(&originalMergeSelectedDevice), reinterpret_cast<void*>(MergeSelectedDeviceHook));
+        if (exclusiveControllerHooksInstalled) detach(reinterpret_cast<void**>(&originalMergeConnectedDevice), reinterpret_cast<void*>(MergeConnectedDeviceHook));
+        if (directInputHooksInstalled) detach(reinterpret_cast<void**>(&originalDirectInputDevicePollState), reinterpret_cast<void*>(DirectInputDevicePollStateHook));
+        if (arcadeControllerHookInstalled) detach(reinterpret_cast<void**>(&originalIsArcadeControllerEnabled), reinterpret_cast<void*>(IsArcadeControllerEnabledHook));
+        if (error == NO_ERROR) error = DetourTransactionCommit();
+        else DetourTransactionAbort();
+        if (error != NO_ERROR)
+        {
+            Log("Could not detach MMIO: %ld; hooks/resources retained.", error);
+            return;
+        }
+    }
+    inputDiagnosticsEnabled.store(false);
+    ShutdownMmLedHooks();
     ShutdownMmGameState();
     arcadeSliderActive.store(false, std::memory_order_relaxed);
     exclusiveControllerActive.store(false, std::memory_order_relaxed);
@@ -1276,62 +1423,23 @@ void ShutdownMmIoHooks()
     debugLastInjectedAxesSimulated = false;
     debugSharedMemorySnapshotInitialized = false;
     arcadeSliderSwitchEdges.Reset();
+    arcadeSliderFrontend.Shutdown();
+    io3Frontend.Shutdown();
     joyShockFrontend.Shutdown();
     sliderModeResolver.Reset();
     mmIoConsumer.Shutdown();
-    if (!installed)
-    {
-        return;
-    }
-
-    DetourTransactionBegin();
-    DetourUpdateThread(GetCurrentThread());
-    DetourDetach(
-        reinterpret_cast<void**>(&originalMergeSliderSensorButtons),
-        MergeSliderSensorButtonsHook);
-    if (inputConfigBindingFallbackHookInstalled)
-    {
-        DetourDetach(
-            reinterpret_cast<void**>(&originalInputConfigGetDeviceActionBinding),
-            InputConfigGetDeviceActionBindingHook);
-    }
-    if (inputCheckActionHookInstalled)
-    {
-        DetourDetach(
-            reinterpret_cast<void**>(&originalInputCheckAction),
-            InputCheckActionHook);
-    }
-    if (selectedDeviceHookInstalled)
-    {
-        DetourDetach(
-            reinterpret_cast<void**>(&originalMergeSelectedDevice),
-            MergeSelectedDeviceHook);
-    }
-    if (exclusiveControllerHooksInstalled)
-    {
-        DetourDetach(
-            reinterpret_cast<void**>(&originalMergeConnectedDevice),
-            MergeConnectedDeviceHook);
-    }
-    if (directInputHooksInstalled)
-    {
-        DetourDetach(
-            reinterpret_cast<void**>(&originalDirectInputDevicePollState),
-            DirectInputDevicePollStateHook);
-    }
-    if (arcadeControllerHookInstalled)
-    {
-        DetourDetach(
-            reinterpret_cast<void**>(&originalIsArcadeControllerEnabled),
-            IsArcadeControllerEnabledHook);
-    }
-    DetourTransactionCommit();
+    ShutdownMmIoRawInput();
+    keyboardButtonEdges.Reset();
+    mergedProviderEdges.Reset();
+    gamepadDirectionEdges.Reset();
     selectedDeviceHookInstalled = false;
     exclusiveControllerHooksInstalled = false;
     directInputHooksInstalled = false;
     inputConfigBindingFallbackHookInstalled = false;
-    inputCheckActionHookInstalled = false;
     arcadeControllerHookInstalled = false;
+    originalGetActionBinding = nullptr;
+    mouseDeviceGateInstalled = false;
+    originalMouseDeviceGate = nullptr;
     installed = false;
 }
 }

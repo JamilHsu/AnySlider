@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cctype>
 #include <charconv>
 #include <string_view>
@@ -40,7 +41,7 @@ std::string ToUpper(std::string value)
     return value;
 }
 
-bool TryParseVirtualKey(const std::string& text, int& virtualKey)
+bool TryParseInputKey(const std::string& text, int& virtualKey)
 {
     const std::string key = Trim(text);
     if (key.size() == 1)
@@ -50,6 +51,18 @@ bool TryParseVirtualKey(const std::string& text, int& virtualKey)
     }
 
     const std::string normalized = ToUpper(key);
+    if (normalized.starts_with("IO3_")) {
+        static const std::unordered_map<std::string, uint16_t> switches = {
+            {"IO3_TEST", jvs_switch::Test}, {"IO3_SERVICE", jvs_switch::Service},
+            {"IO3_START", jvs_switch::Start}, {"IO3_TRIANGLE", jvs_switch::Triangle},
+            {"IO3_SQUARE", jvs_switch::Square}, {"IO3_CROSS", jvs_switch::Cross},
+            {"IO3_CIRCLE", jvs_switch::Circle}
+        };
+        const auto found = switches.find(normalized);
+        if (found == switches.end()) return false;
+        virtualKey = MmIoIo3KeyBase + std::countr_zero(found->second);
+        return true;
+    }
     static const std::unordered_map<std::string, int> namedKeys = {
         { "ENTER", VK_RETURN }, { "RETURN", VK_RETURN }, { "TAB", VK_TAB },
         { "BACK", VK_BACK }, { "BACKSPACE", VK_BACK }, { "SPACE", VK_SPACE },
@@ -123,13 +136,13 @@ void AppendDelimitedKeys(const std::string& text, MmIoKeyBinding& binding, const
         if (!Trim(key).empty())
         {
             int virtualKey = 0;
-            if (TryParseVirtualKey(key, virtualKey))
+            if (TryParseInputKey(key, virtualKey))
             {
                 binding.push_back(virtualKey);
             }
             else
             {
-                Log("Invalid keyboard binding %s=%s", configKey, key.c_str());
+                Log("Invalid input binding %s=%s", configKey, key.c_str());
             }
         }
         if (end == std::string::npos)
@@ -140,7 +153,7 @@ void AppendDelimitedKeys(const std::string& text, MmIoKeyBinding& binding, const
     }
 }
 
-void LoadKeyboardBinding(const toml::table& document, const char* configKey, MmIoKeyBinding& binding)
+void LoadInputBinding(const toml::table& document, const char* configKey, MmIoKeyBinding& binding)
 {
     const auto node = document[configKey];
     if (!node)
@@ -159,7 +172,7 @@ void LoadKeyboardBinding(const toml::table& document, const char* configKey, MmI
             }
             else
             {
-                Log("Invalid keyboard binding array entry for %s", configKey);
+                Log("Invalid input binding array entry for %s", configKey);
             }
         }
     }
@@ -169,7 +182,7 @@ void LoadKeyboardBinding(const toml::table& document, const char* configKey, MmI
     }
     else
     {
-        Log("Invalid keyboard binding value for %s", configKey);
+        Log("Invalid input binding value for %s", configKey);
         return;
     }
     binding = std::move(parsed);
@@ -234,10 +247,14 @@ float LoadMouseSensitivity(const toml::table& document, const char* key)
     return value;
 }
 
+// 加载鼠标方向模拟slider的配置
 void LoadMouseSliderConfig(const toml::table& document, MmIoConfig& config)
 {
     auto& mouse = config.mouse_slider;
+    // 使用鼠标输入来作为滑条使用
     mouse.enabled = document["io_use_mouse_as_slider"].value_or(false);
+    // 绑定的鼠标移动轴，一般分配到"x"或"y"，也可以是"wheel"滚轮
+    // 注：slider_1是左半边，slider_2是右半边的slider区域
     const std::string axis1 = document["io_mouse_slider_1_axis"].value_or(std::string("x"));
     const std::string axis2 = document["io_mouse_slider_2_axis"].value_or(std::string("y"));
     if (!TryParseMouseAxis(axis1, mouse.slider_1.axis))
@@ -250,10 +267,13 @@ void LoadMouseSliderConfig(const toml::table& document, MmIoConfig& config)
         Log("Invalid io_mouse_slider_2_axis=%s; using y.", axis2.c_str());
         mouse.slider_2.axis = MmIoMouseAxis::Y;
     }
+    // 是否开启方向反转
     mouse.slider_1.invert = document["io_mouse_slider_1_invert"].value_or(false);
     mouse.slider_2.invert = document["io_mouse_slider_2_invert"].value_or(false);
+    // 鼠标灵敏度
     mouse.slider_1.sensitivity = LoadMouseSensitivity(document, "io_mouse_slider_1_sensitivity");
     mouse.slider_2.sensitivity = LoadMouseSensitivity(document, "io_mouse_slider_2_sensitivity");
+
     mouse.counts_per_cycle = document["io_mouse_slider_counts_per_cycle"].value_or(256.0f);
     if (mouse.counts_per_cycle < 1.0f || mouse.counts_per_cycle > 100000.0f)
     {
@@ -261,12 +281,14 @@ void LoadMouseSliderConfig(const toml::table& document, MmIoConfig& config)
         mouse.counts_per_cycle = 256.0f;
     }
     constexpr uint32_t kMaxMouseSliderTouchHoldMs = 5000;
+    // 停止移动多久后，当作松开触摸
     mouse.touch_hold_ms = document["io_mouse_slider_touch_hold_ms"].value_or<uint32_t>(20);
     if (mouse.touch_hold_ms > kMaxMouseSliderTouchHoldMs)
     {
         Log("Invalid io_mouse_slider_touch_hold_ms=%u; using 20.", mouse.touch_hold_ms);
-        mouse.touch_hold_ms = 0;
+        mouse.touch_hold_ms = 20;
     }
+    // 指定鼠标设备的VID PID，留空就是所有鼠标
     const std::string device = document["io_mouse_slider_device"].value_or(std::string{});
     const std::string device_filter = NormalizeMouseSliderDeviceFilter(device);
     mouse.device_filter.assign(device_filter.begin(), device_filter.end());
@@ -276,13 +298,19 @@ void LoadMouseSliderConfig(const toml::table& document, MmIoConfig& config)
     }
 }
 
+// 手柄IO配置
 void LoadGamepadConfig(const toml::table& document, MmIoConfig& config)
 {
     auto& gamepad = config.gamepad;
+    // 开启手柄输入前端
     gamepad.enabled = document["io_gamepad_frontend"].value_or(false);
+    // 指定手柄设备
     gamepad.device = document["io_gamepad_device"].value_or(std::string("auto"));
+    // 使用DualShock4和DualSense的触摸板来当作Slider
     gamepad.touchpad_slider = document["io_gamepad_touchpad_slider"].value_or(true);
+    // 反转触摸Slider方向
     gamepad.touchpad_invert = document["io_gamepad_touchpad_invert"].value_or(false);
+    // 摇杆死区设置
     gamepad.stick_slider_deadzone = document["io_gamepad_stick_slider_deadzone"].value_or(0.5f);
     if (gamepad.stick_slider_deadzone < 0.1f || gamepad.stick_slider_deadzone > 0.95f)
     {
@@ -291,39 +319,41 @@ void LoadGamepadConfig(const toml::table& document, MmIoConfig& config)
     }
 }
 
-void LoadKeyboardBindings(const toml::table& document, MmIoKeyboardBindings& bindings)
+void LoadInputBindings(const toml::table& document, MmIoInputBindings& bindings)
 {
-    LoadKeyboardBinding(document, "io_key_test", bindings.test);
-    LoadKeyboardBinding(document, "io_key_service", bindings.service);
-    LoadKeyboardBinding(document, "io_key_pause", bindings.pause);
-    LoadKeyboardBinding(document, "io_key_start", bindings.start);
-    LoadKeyboardBinding(document, "io_key_dpad_up", bindings.dpad_up);
-    LoadKeyboardBinding(document, "io_key_dpad_down", bindings.dpad_down);
-    LoadKeyboardBinding(document, "io_key_dpad_left", bindings.dpad_left);
-    LoadKeyboardBinding(document, "io_key_dpad_right", bindings.dpad_right);
-    LoadKeyboardBinding(document, "io_key_triangle", bindings.triangle);
-    LoadKeyboardBinding(document, "io_key_square", bindings.square);
-    LoadKeyboardBinding(document, "io_key_cross", bindings.cross);
-    LoadKeyboardBinding(document, "io_key_circle", bindings.circle);
-    LoadKeyboardBinding(document, "io_key_l1", bindings.l1);
-    LoadKeyboardBinding(document, "io_key_r1", bindings.r1);
-    LoadKeyboardBinding(document, "io_key_l2", bindings.l2);
-    LoadKeyboardBinding(document, "io_key_r2", bindings.r2);
-    LoadKeyboardBinding(document, "io_key_select", bindings.select);
-    LoadKeyboardBinding(document, "io_key_l3", bindings.l3);
-    LoadKeyboardBinding(document, "io_key_r3", bindings.r3);
-    LoadKeyboardBinding(document, "io_key_slider_1_left", bindings.slider_1_left);
-    LoadKeyboardBinding(document, "io_key_slider_1_right", bindings.slider_1_right);
-    LoadKeyboardBinding(document, "io_key_slider_2_left", bindings.slider_2_left);
-    LoadKeyboardBinding(document, "io_key_slider_2_right", bindings.slider_2_right);
+    LoadInputBinding(document, "io_key_test", bindings.test);
+    LoadInputBinding(document, "io_key_service", bindings.service);
+    LoadInputBinding(document, "io_key_pause", bindings.pause);
+    LoadInputBinding(document, "io_key_start", bindings.start);
+    LoadInputBinding(document, "io_key_dpad_up", bindings.dpad_up);
+    LoadInputBinding(document, "io_key_dpad_down", bindings.dpad_down);
+    LoadInputBinding(document, "io_key_dpad_left", bindings.dpad_left);
+    LoadInputBinding(document, "io_key_dpad_right", bindings.dpad_right);
+    LoadInputBinding(document, "io_key_triangle", bindings.triangle);
+    LoadInputBinding(document, "io_key_square", bindings.square);
+    LoadInputBinding(document, "io_key_cross", bindings.cross);
+    LoadInputBinding(document, "io_key_circle", bindings.circle);
+    LoadInputBinding(document, "io_key_l1", bindings.l1);
+    LoadInputBinding(document, "io_key_r1", bindings.r1);
+    LoadInputBinding(document, "io_key_l2", bindings.l2);
+    LoadInputBinding(document, "io_key_r2", bindings.r2);
+    LoadInputBinding(document, "io_key_select", bindings.select);
+    LoadInputBinding(document, "io_key_l3", bindings.l3);
+    LoadInputBinding(document, "io_key_r3", bindings.r3);
+    LoadInputBinding(document, "io_key_slider_1_left", bindings.slider_1_left);
+    LoadInputBinding(document, "io_key_slider_1_right", bindings.slider_1_right);
+    LoadInputBinding(document, "io_key_slider_2_left", bindings.slider_2_left);
+    LoadInputBinding(document, "io_key_slider_2_right", bindings.slider_2_right);
 
     for (size_t index = 0; index < bindings.slider_cells.size(); ++index)
     {
         char configKey[32];
         sprintf_s(configKey, "io_key_slider_%02zu", index + 1);
-        LoadKeyboardBinding(document, configKey, bindings.slider_cells[index]);
+        LoadInputBinding(document, configKey, bindings.slider_cells[index]);
     }
 }
+
+
 }
 
 bool LoadMmIoConfig(MmIoConfig& config)
@@ -331,24 +361,55 @@ bool LoadMmIoConfig(MmIoConfig& config)
     try
     {
         const toml::table document = toml::parse_file("config.toml");
+        // 调试开关
         SetDebugLoggingEnabled(document["debug"].value_or(false));
+        // IO总开关
         config.enabled = document["io_enabled"].value_or(false);
-        config.keyboard_mouse_frontend = document["io_keyboard_mouse_frontend"].value_or(false);
-        config.keep_game_active_unfocused = document["io_keep_game_active_unfocused"].value_or(false);
-        config.block_keyboard_mouse_input = document["io_block_keyboard_mouse_input"].value_or(false);
-        config.exclusive_controller_input = document["io_exclusive_controller_input"].value_or(false);
-        const std::string sliderMode = document["io_slider_mode"].value_or(std::string("arcade"));
-        if (!TryParseSliderMode(sliderMode, config.slider_mode))
+
+        // ====
+        // 通用IO功能
+        // ====
+
+        // 共享内存输入名
+        const std::string mappingName = document["io_shared_memory"]
+            .value_or(std::string("Local\\MMIO_SHARED_BUFFER"));
+        config.shared_memory_name.assign(mappingName.begin(), mappingName.end());
+        if (config.shared_memory_name.empty())
         {
-            Log("Invalid io_slider_mode=%s; using arcade.", sliderMode.c_str());
-            config.slider_mode = MmIoSliderMode::Arcade;
+            config.shared_memory_name = mmio::kSharedMemoryName;
         }
+        // 最大IO超时时间（超时就会释放当前输入）
         config.max_input_lease_ms = document["io_max_input_lease_ms"].value_or<uint64_t>(500);
         if (config.max_input_lease_ms == 0 || config.max_input_lease_ms > 10'000)
         {
             Log("Invalid io_max_input_lease_ms; using 500 ms.");
             config.max_input_lease_ms = 500;
         }
+        // 独占游戏输入（开启后屏蔽游戏原本的输入逻辑，只由mod提供输入）
+        config.exclusive_controller_input = document["io_exclusive_controller_input"].value_or(false);
+        // 让游戏不在前台时保持运行
+        config.keep_game_active_unfocused = document["io_keep_game_active_unfocused"].value_or(false);
+
+        // ====
+        // 基础IO配置
+        // ====
+
+        // IO模拟的设备类型
+        config.controller_type = document["io_controller_type"].value_or(-1);
+        if (config.controller_type < -1 || config.controller_type > 10)
+        {
+            Log("Invalid io_controller_type; using -1 (auto).");
+            config.controller_type = -1;
+        }
+        // 滑条模式
+        const std::string sliderMode = document["io_slider_mode"].value_or(std::string("arcade"));
+        if (!TryParseSliderMode(sliderMode, config.slider_mode))
+        {
+            Log("Invalid io_slider_mode=%s; using arcade.", sliderMode.c_str());
+            config.slider_mode = MmIoSliderMode::Arcade;
+        }
+        // Arcade 模式下滑条模拟速度，单位为 cell/秒。
+        // 只对左右输入有效，对直接 32 - cell 输入和 mouse_as_slider 模式无效
         config.arcade_slider_emu_cells_per_second =
             document["io_arcade_slider_emu_cells_per_second"].value_or(32.0f);
         if (config.arcade_slider_emu_cells_per_second <= 0.0f ||
@@ -357,18 +418,111 @@ bool LoadMmIoConfig(MmIoConfig& config)
             Log("Invalid io_arcade_slider_emu_cells_per_second; using 32.");
             config.arcade_slider_emu_cells_per_second = 32.0f;
         }
-        config.keyboard_bindings = DefaultMmIoKeyboardBindings();
-        LoadKeyboardBindings(document, config.keyboard_bindings);
+        // 使用O来作为确认按键
+        config.use_ps_circle_confirm = document["io_use_ps_circle_confirm"].value_or(false);
+        config.swap_ox_sprite = document["io_swap_ox_sprite"].value_or(true);
+        // 在手柄接入时保持鼠标输入
+        config.show_mouse_with_controller = document["io_show_mouse_with_controller"].value_or(true);
+
+        // ====
+        // 键鼠IO配置
+        // ====
+
+        // 开启键盘鼠标输入前端
+        config.keyboard_mouse_frontend = document["io_keyboard_mouse_frontend"].value_or(false);
+        // 屏蔽游戏自身的键盘输入
+        config.block_keyboard_input = document["io_block_keyboard_input"].value_or(false);
+        // 屏蔽游戏自身的鼠标输入
+        config.block_mouse_input = document["io_block_mouse_input"].value_or(false);
+        // 鼠标滑条设置
         LoadMouseSliderConfig(document, config);
+
+        // ====
+        // 手柄IO配置
+        // ====
+
         LoadGamepadConfig(document, config);
 
-        const std::string mappingName = document["io_shared_memory"]
-            .value_or(std::string("Local\\MMIO_SHARED_BUFFER"));
-        config.shared_memory_name.assign(mappingName.begin(), mappingName.end());
-        if (config.shared_memory_name.empty())
+        // ====
+        // 街机IO配置
+        // 分为IO3(+AMEX)、Slider、触屏三个部分
+        // ====
+
+        // 开启街机IO3输入（需要AMEX板）
+        config.io3.enabled = document["io_io3_backend"].value_or(false);
+        // Polling速率
+        config.io3.poll_interval_ms = document["io_io3_poll_interval_ms"].value_or<uint32_t>(4);
+        // 超时时间
+        config.io3.timeout_ms = document["io_io3_timeout_ms"].value_or<uint32_t>(1000);
+        if (config.io3.poll_interval_ms < 1 || config.io3.poll_interval_ms > 100)
         {
-            config.shared_memory_name = mmio::kSharedMemoryName;
+            Log("Invalid io_io3_poll_interval_ms; using 4.");
+            config.io3.poll_interval_ms = 4;
         }
+        if (config.io3.timeout_ms < 10 || config.io3.timeout_ms > 10000)
+        {
+            Log("Invalid io_io3_timeout_ms; using 1000.");
+            config.io3.timeout_ms = 1000;
+        }
+        // 街机灯效跟随实际按键位置，而不是绑定位置（默认开启）
+        config.io3.led_use_hardware_position = document["io_io3_led_use_hardware_position"].value_or(true);
+
+        // 开启街机滑条
+        config.arcade_slider.enabled = document["io_arcade_slider_backend"].value_or(false);
+        // 街机滑条端口，默认COM11
+        config.arcade_slider.port = document["io_arcade_slider_port"].value_or(std::string("COM11"));
+        // 街机滑条连接前发送DTR-RTS
+        config.arcade_slider.assert_dtr_rts = document["io_arcade_slider_dtr_rts"].value_or(true);
+
+
+        // 开启街机触屏连接
+        config.touchscreen.enabled = document["io_arcade_touchscreen_backend"].value_or(false);
+        // 街机触屏端口，默认COM1
+        config.touchscreen.port = document["io_arcade_touchscreen_port"].value_or(std::string("COM1"));
+        // 手动兜底校准：仅EEPROM校准不可用时生效，默认双轴取反
+        config.touchscreen.invert_x = document["io_arcade_touchscreen_invert_x"].value_or(true);
+        config.touchscreen.invert_y = document["io_arcade_touchscreen_invert_y"].value_or(true);
+        // 街机触屏交换XY轴，不需要打开
+        config.touchscreen.swap_xy = document["io_arcade_touchscreen_swap_xy"].value_or(false);
+        // 街机触屏兜底用的原始坐标范围，默认读取EEPROM校准
+        config.touchscreen.min_x = document["io_arcade_touchscreen_min_x"].value_or(0);
+        config.touchscreen.max_x = document["io_arcade_touchscreen_max_x"].value_or(4095);
+        config.touchscreen.min_y = document["io_arcade_touchscreen_min_y"].value_or(0);
+        config.touchscreen.max_y = document["io_arcade_touchscreen_max_y"].value_or(4095);
+        if (config.touchscreen.min_x < 0 || config.touchscreen.max_x > 4095 ||
+            config.touchscreen.min_y < 0 || config.touchscreen.max_y > 4095 ||
+            config.touchscreen.min_x >= config.touchscreen.max_x ||
+            config.touchscreen.min_y >= config.touchscreen.max_y)
+        {
+            Log("Touchscreen: invalid calibration bounds; disabling backend");
+            config.touchscreen.enabled = false;
+        }
+
+        // 控制街机灯效跟随场景生成
+        config.arcade_led.enabled = document["io_arcade_led"].value_or(true);
+        // 滑条LED歌曲加载百分比动画
+        config.arcade_led.loading_progress = document["io_arcade_led_loading_progress"].value_or(false);
+
+        // 可选原生测试菜单；只在启动时安装，不影响设备采样。
+        config.enable_test_mode = document["io_enable_test_mode"].value_or(false);
+
+        // 测试功能
+        // LED诊断
+        config.led_diagnostics = document["io_led_diagnostics"].value_or(false);
+        // 输入诊断
+        config.input_diagnostics = document["io_input_diagnostics"].value_or(false) && IsDebugLoggingEnabled();
+        if (document["io_input_diagnostics"].value_or(false) && !IsDebugLoggingEnabled())
+            Log("io_input_diagnostics ignored: requires debug=true.");
+        config.input_diagnostics_arcade = document["io_input_diagnostics_arcade"].value_or(-1);
+        if (config.input_diagnostics_arcade < -1 || config.input_diagnostics_arcade > 1)
+        {
+            Log("Invalid diagnostic arcade override; using -1 (normal).");
+            config.input_diagnostics_arcade = -1;
+        }
+
+        // 输入按键绑定
+        config.input_bindings = DefaultMmIoInputBindings();
+        LoadInputBindings(document, config.input_bindings);
 
         return true;
     }

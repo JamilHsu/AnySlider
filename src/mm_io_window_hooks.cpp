@@ -4,6 +4,9 @@
 
 #include "anyslider_log.h"
 #include "mm_io_keyboard.h"
+#include "arcade_eeprom.h"
+#include "mm_io_touchscreen_test_hooks.h"
+#include "touchscreen_mapping.h"
 
 #include <atomic>
 #include <vector>
@@ -18,8 +21,22 @@ using GetForegroundWindowFunction = HWND(WINAPI*)();
 MmIoConfig windowHookConfig;
 GetAsyncKeyStateFunction originalGetAsyncKeyState = GetAsyncKeyState;
 GetForegroundWindowFunction originalGetForegroundWindow = GetForegroundWindow;
+using GetCursorPosFunction = BOOL(WINAPI*)(LPPOINT);
+GetCursorPosFunction originalGetCursorPos = GetCursorPos;
+MmIoTouchscreenFrontend touchscreen;
+arcade_eeprom::TouchCalibration touchCalibration;
+bool requireFreshTouch = false;
+std::atomic_bool touchDown = false;
+std::atomic_bool touchPositionValid = false;
+std::atomic<LONG> touchScreenX = 0, touchScreenY = 0;
 WNDPROC originalWindowProcedure = nullptr;
 HWND gameWindow = nullptr;
+bool windowApiHooksInstalled = false;
+std::atomic_bool windowHooksRunning = false;
+std::atomic_bool windowClosing = false;
+ULONGLONG nextWindowAttempt = 0;
+HWND lastFailedWindow = nullptr;
+DWORD lastWindowError = ERROR_SUCCESS;
 thread_local bool allowKeyboardFrontendPoll = false;
 
 bool ShouldBypassFocusLoss()
@@ -27,9 +44,14 @@ bool ShouldBypassFocusLoss()
     return windowHookConfig.keep_game_active_unfocused;
 }
 
-bool ShouldBlockKeyboardMouseInput()
+bool ShouldBlockKeyboardInput()
 {
-    return windowHookConfig.block_keyboard_mouse_input;
+    return windowHookConfig.block_keyboard_input;
+}
+
+bool ShouldBlockMouseInput()
+{
+    return windowHookConfig.block_mouse_input;
 }
 
 bool IsKeyboardVirtualKey(int virtualKey)
@@ -65,13 +87,22 @@ bool IsKeyboardMouseVirtualKey(int virtualKey)
 
 SHORT WINAPI GetAsyncKeyStateHook(int virtualKey)
 {
-    if (windowHookConfig.block_keyboard_mouse_input &&
-        IsKeyboardMouseVirtualKey(virtualKey) &&
+    if (windowHookConfig.touchscreen.enabled && virtualKey == VK_LBUTTON && touchDown &&
+        originalGetForegroundWindow() == gameWindow)
+        return static_cast<SHORT>(0x8000);
+    if (((windowHookConfig.block_keyboard_input && IsKeyboardVirtualKey(virtualKey)) ||
+         (windowHookConfig.block_mouse_input && IsMouseVirtualKey(virtualKey))) &&
         !allowKeyboardFrontendPoll)
     {
         return 0;
     }
     return originalGetAsyncKeyState(virtualKey);
+}
+
+BOOL WINAPI GetCursorPosHook(LPPOINT point)
+{
+    if (point && touchPositionValid && originalGetForegroundWindow() == gameWindow) { *point = POINT{touchScreenX.load(), touchScreenY.load()}; return TRUE; }
+    return originalGetCursorPos(point);
 }
 
 HWND WINAPI GetForegroundWindowHook()
@@ -83,7 +114,7 @@ HWND WINAPI GetForegroundWindowHook()
     return originalGetForegroundWindow();
 }
 
-bool IsBlockedKeyboardMouseMessage(UINT message)
+bool IsKeyboardMessage(UINT message)
 {
     switch (message)
     {
@@ -95,6 +126,16 @@ bool IsBlockedKeyboardMouseMessage(UINT message)
     case WM_SYSCHAR:
     case WM_DEADCHAR:
     case WM_SYSDEADCHAR:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool IsMouseMessage(UINT message)
+{
+    switch (message)
+    {
     case WM_MOUSEMOVE:
     case WM_LBUTTONDOWN:
     case WM_LBUTTONUP:
@@ -118,6 +159,20 @@ bool IsBlockedKeyboardMouseMessage(UINT message)
 
 LRESULT CALLBACK GameWindowProcedureHook(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
 {
+    // 主窗口销毁之后禁止OnFrame重新寻找/安装窗口hook。
+    // 不在WM_CLOSE停止：游戏可能拒绝关闭；WM_DESTROY才表示销毁已开始。
+    if (message == WM_DESTROY || message == WM_NCDESTROY)
+    {
+        windowClosing.store(true, std::memory_order_release);
+        touchDown = false;
+        touchPositionValid = false;
+        return CallWindowProcW(originalWindowProcedure, window, message, wParam, lParam);
+    }
+    // 清理后若仍在其他模组的WndProc链中，只透传，不再过滤输入。
+    if (!windowHooksRunning.load(std::memory_order_acquire))
+        return CallWindowProcW(originalWindowProcedure, window, message, wParam, lParam);
+    if (message == WM_MOUSEMOVE && !touchDown && !ShouldBlockMouseInput())
+        touchPositionValid = false;
     if (ShouldBypassFocusLoss())
     {
         if ((message == WM_ACTIVATEAPP && wParam == FALSE) ||
@@ -128,12 +183,14 @@ LRESULT CALLBACK GameWindowProcedureHook(HWND window, UINT message, WPARAM wPara
         }
     }
 
-    if (ShouldBlockKeyboardMouseInput())
+    if (ShouldBlockKeyboardInput() && IsKeyboardMessage(message))
     {
-        if (IsBlockedKeyboardMouseMessage(message))
-        {
-            return 0;
-        }
+        return 0;
+    }
+
+    if (ShouldBlockMouseInput() && IsMouseMessage(message))
+    {
+        return 0;
     }
 
     return CallWindowProcW(originalWindowProcedure, window, message, wParam, lParam);
@@ -171,6 +228,54 @@ HWND FindMainGameWindow()
     return best.first;
 }
 
+void ReleaseTouchscreen()
+{
+    const bool wasDown = touchDown; touchDown = false; touchPositionValid = false;
+    if (wasDown && originalWindowProcedure && gameWindow && IsWindow(gameWindow))
+    {
+        POINT point{touchScreenX.load(), touchScreenY.load()}; ScreenToClient(gameWindow, &point);
+        CallWindowProcW(originalWindowProcedure, gameWindow, WM_LBUTTONUP, 0,
+            MAKELPARAM(point.x, point.y));
+    }
+}
+
+void PumpTouchscreen()
+{
+    // Real foreground API, never the focus-loss bypass. No clicks in other applications.
+    const bool focused = originalGetForegroundWindow() == gameWindow;
+    elo::Event event;
+    if (!focused)
+    {
+        ReleaseTouchscreen();
+        requireFreshTouch = true;
+        touchscreen.ResetContact();
+        return;
+    }
+    // One queued event per game update preserves short DOWN/UP across frames.
+    if (!touchscreen.Consume(event)) return;
+    if (requireFreshTouch)
+    {
+        if (event.initial || !event.down) requireFreshTouch = false;
+        else return;
+    }
+    RECT rect{}; if (!GetClientRect(gameWindow, &rect) || rect.right <= 0 || rect.bottom <= 0)
+    { ReleaseTouchscreen(); return; }
+    const auto norm = MapTouchToNormalized(event, windowHookConfig.touchscreen, touchCalibration);
+    POINT point{
+        LONG(norm.x * (rect.right - 1)),
+        LONG(norm.y * (rect.bottom - 1))};
+    POINT screenPoint = point;
+    if (!ClientToScreen(gameWindow, &screenPoint)) { ReleaseTouchscreen(); return; }
+    touchScreenX = screenPoint.x; touchScreenY = screenPoint.y;
+    const bool wasDown = touchDown; touchDown = event.down; touchPositionValid = true;
+    const LPARAM position = MAKELPARAM(point.x, point.y);
+    // Call the original procedure: trusted internal input survives mouse blocking.
+    CallWindowProcW(originalWindowProcedure, gameWindow, WM_MOUSEMOVE, touchDown ? MK_LBUTTON : 0, position);
+    if (wasDown != touchDown)
+        CallWindowProcW(originalWindowProcedure, gameWindow, touchDown ? WM_LBUTTONDOWN : WM_LBUTTONUP,
+            touchDown ? MK_LBUTTON : 0, position);
+}
+
 void DumpRegisteredRawInputDevices()
 {
     UINT count = 0;
@@ -201,13 +306,25 @@ void DumpRegisteredRawInputDevices()
 
 bool InitializeMmIoWindowHooks(const MmIoConfig& config)
 {
+    if (windowApiHooksInstalled) return true;
+    windowHooksRunning = false;
     windowHookConfig = config;
-    if (!config.block_keyboard_mouse_input && !config.keep_game_active_unfocused)
+    windowClosing = false;
+    nextWindowAttempt = 0;
+    lastFailedWindow = nullptr;
+    lastWindowError = ERROR_SUCCESS;
+    const bool blockAnyInput = config.block_keyboard_input || config.block_mouse_input;
+    if (!blockAnyInput && !config.keep_game_active_unfocused && !config.touchscreen.enabled)
     {
         return true;
     }
 
     LONG error = DetourTransactionBegin();
+    if (error != NO_ERROR)
+    {
+        Log("Window hook transaction unavailable: %ld", error);
+        return false; // 未取得事务，不得Abort其他模块事务。
+    }
     if (error == NO_ERROR)
     {
         error = DetourUpdateThread(GetCurrentThread());
@@ -216,14 +333,16 @@ bool InitializeMmIoWindowHooks(const MmIoConfig& config)
     {
         error = DetourAttach(
             reinterpret_cast<void**>(&originalGetForegroundWindow),
-            GetForegroundWindowHook);
+            reinterpret_cast<void*>(GetForegroundWindowHook));
     }
-    if (error == NO_ERROR && config.block_keyboard_mouse_input)
+    if (error == NO_ERROR && (blockAnyInput || config.touchscreen.enabled))
     {
         error = DetourAttach(
             reinterpret_cast<void**>(&originalGetAsyncKeyState),
-            GetAsyncKeyStateHook);
+            reinterpret_cast<void*>(GetAsyncKeyStateHook));
     }
+    if (error == NO_ERROR && config.touchscreen.enabled)
+        error = DetourAttach(reinterpret_cast<void**>(&originalGetCursorPos), reinterpret_cast<void*>(GetCursorPosHook));
     if (error == NO_ERROR)
     {
         error = DetourTransactionCommit();
@@ -238,24 +357,58 @@ bool InitializeMmIoWindowHooks(const MmIoConfig& config)
         return false;
     }
 
+    windowApiHooksInstalled = true;
+    touchCalibration = {};
+    if (config.touchscreen.enabled)
+    {
+        DebugLog("Touchscreen: backend enabled; port=%s", config.touchscreen.port.c_str());
+        if (!arcade_eeprom::ReadTouchCalibration(touchCalibration))
+            DebugLog("Touchscreen: calibration source=manual fallback; X=[%d,%d] Y=[%d,%d] invert=(%d,%d) swap_xy=%d",
+                config.touchscreen.min_x, config.touchscreen.max_x, config.touchscreen.min_y, config.touchscreen.max_y,
+                config.touchscreen.invert_x, config.touchscreen.invert_y, config.touchscreen.swap_xy);
+    }
+    touchscreen.Initialize(config.touchscreen);
+    InstallTouchScreenTestHooks(config.touchscreen.enabled && config.enable_test_mode);
+    windowHooksRunning.store(true, std::memory_order_release);
     return true;
 }
 
 void UpdateMmIoWindowHooks()
 {
-    if ((!windowHookConfig.keep_game_active_unfocused && !windowHookConfig.block_keyboard_mouse_input) ||
-        originalWindowProcedure)
+    if (!windowHooksRunning.load(std::memory_order_acquire) ||
+        windowClosing.load(std::memory_order_acquire)) return;
+    const bool blockAnyInput = windowHookConfig.block_keyboard_input || windowHookConfig.block_mouse_input;
+    if (!windowHookConfig.keep_game_active_unfocused && !blockAnyInput && !windowHookConfig.touchscreen.enabled)
     {
         return;
     }
 
+    if (originalWindowProcedure && gameWindow && IsWindow(gameWindow))
+    {
+        if (windowHookConfig.touchscreen.enabled) PumpTouchscreen();
+        return;
+    }
+    const auto now = GetTickCount64();
+    if (now < nextWindowAttempt) return;
+    nextWindowAttempt = now + 1000; // 找不到/安装失败时每秒重试，不在每帧枚举并刷日志。
+    ReleaseTouchscreen();
+    touchscreen.ResetContact();
+    requireFreshTouch = true;
+    originalWindowProcedure = nullptr;
     gameWindow = FindMainGameWindow();
     if (!gameWindow)
     {
         return;
     }
 
-    // Install WndProc first, then register Raw Input against this window.
+    // 枚举后窗口可能已销毁或HWND被复用，再确认属于当前进程。
+    DWORD owner = 0;
+    const DWORD thread = GetWindowThreadProcessId(gameWindow, &owner);
+    if (!thread || owner != GetCurrentProcessId() || !IsWindow(gameWindow) || windowClosing.load())
+    {
+        gameWindow = nullptr;
+        return;
+    }
     SetLastError(ERROR_SUCCESS);
     originalWindowProcedure = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
         gameWindow,
@@ -263,25 +416,75 @@ void UpdateMmIoWindowHooks()
         reinterpret_cast<LONG_PTR>(GameWindowProcedureHook)));
     if (!originalWindowProcedure)
     {
-        Log("Could not install game window hook: %lu", GetLastError());
+        const DWORD error = GetLastError(); // 必须在其他Win32调用之前取错误码。
+        if (lastFailedWindow != gameWindow || lastWindowError != error)
+        {
+            Log("Could not install game window hook: %lu (hwnd=%p owner=%lu thread=%lu caller=%lu); retry in 1s",
+                error, gameWindow, owner, thread, GetCurrentThreadId());
+            lastFailedWindow = gameWindow;
+            lastWindowError = error;
+        }
+        gameWindow = nullptr;
         return;
     }
+    lastFailedWindow = nullptr;
+    lastWindowError = ERROR_SUCCESS;
 
 }
 void ShutdownMmIoWindowHooks()
 {
+    windowHooksRunning.store(false, std::memory_order_release);
+    windowClosing.store(true, std::memory_order_release);
+    UninstallTouchScreenTestHooks();
+    touchscreen.Shutdown();
+    ReleaseTouchscreen();
     if (originalWindowProcedure && gameWindow && IsWindow(gameWindow))
-        SetWindowLongPtrW(gameWindow, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(originalWindowProcedure));
-    originalWindowProcedure = nullptr;
-    gameWindow = nullptr;
+    {
+        // 不覆盖其他模组后装的WndProc：它可能仍通过我们的hook转发。
+        const auto current = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(gameWindow, GWLP_WNDPROC));
+        if (current == GameWindowProcedureHook)
+        {
+            SetLastError(ERROR_SUCCESS);
+            const auto previous = SetWindowLongPtrW(gameWindow, GWLP_WNDPROC,
+                reinterpret_cast<LONG_PTR>(originalWindowProcedure));
+            if (!previous && GetLastError() != ERROR_SUCCESS)
+                Log("Could not restore game window procedure: %lu; forwarding state retained", GetLastError());
+            else
+            {
+                originalWindowProcedure = nullptr;
+                gameWindow = nullptr;
+            }
+        }
+        // 若别的模组在链顶，保留原procedure供残留callback使用；不支持热卸载。
+    }
+    else
+    {
+        originalWindowProcedure = nullptr;
+        gameWindow = nullptr;
+    }
+    if (!windowApiHooksInstalled) return;
+    const bool blockAnyInput = windowHookConfig.block_keyboard_input || windowHookConfig.block_mouse_input;
     LONG error = DetourTransactionBegin();
+    if (error != NO_ERROR)
+    {
+        Log("Window detach transaction unavailable: %ld; hook state retained", error);
+        return;
+    }
     if (error == NO_ERROR) error = DetourUpdateThread(GetCurrentThread());
     if (error == NO_ERROR && windowHookConfig.keep_game_active_unfocused)
-        error = DetourDetach(reinterpret_cast<void**>(&originalGetForegroundWindow), GetForegroundWindowHook);
-    if (error == NO_ERROR && windowHookConfig.block_keyboard_mouse_input)
-        error = DetourDetach(reinterpret_cast<void**>(&originalGetAsyncKeyState), GetAsyncKeyStateHook);
+        error = DetourDetach(reinterpret_cast<void**>(&originalGetForegroundWindow), reinterpret_cast<void*>(GetForegroundWindowHook));
+    if (error == NO_ERROR && (blockAnyInput || windowHookConfig.touchscreen.enabled))
+        error = DetourDetach(reinterpret_cast<void**>(&originalGetAsyncKeyState), reinterpret_cast<void*>(GetAsyncKeyStateHook));
+    if (error == NO_ERROR && windowHookConfig.touchscreen.enabled)
+        error = DetourDetach(reinterpret_cast<void**>(&originalGetCursorPos), reinterpret_cast<void*>(GetCursorPosHook));
     if (error == NO_ERROR) error = DetourTransactionCommit(); else DetourTransactionAbort();
-    if (error != NO_ERROR) Log("Could not remove window hooks: %ld", error);
-    windowHookConfig = {};
+    if (error != NO_ERROR)
+    {
+        Log("Could not remove window hooks: %ld; hook state retained", error);
+        return;
+    }
+    windowApiHooksInstalled = false;
+    // WndProc可能仍被别的模组引用，不清空其转发配置。
+    if (!originalWindowProcedure) windowHookConfig = {};
 }
 }
