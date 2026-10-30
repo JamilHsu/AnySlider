@@ -78,10 +78,10 @@ namespace anyslider::mmio
         R1 = 12,
         L2 = 13,
         R2 = 14,
+        L3 = 15,
+        R3 = 16,
 
-        Select = 15,
-        L3 = 16,
-        R3 = 17,
+        Select = 17,
 
         Sw1 = 18, // ArcadeController MenuLeftAction
         Sw2 = 19, // ArcadeController MenuRightAction

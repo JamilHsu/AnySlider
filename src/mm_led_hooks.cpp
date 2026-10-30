@@ -40,11 +40,13 @@ uint64_t __fastcall PackHook(void* task) {
         void* device = nullptr;
         std::memcpy(&device, static_cast<uint8_t*>(task) + 104, sizeof(device));
         if (device) {
-            const auto* payload = static_cast<const uint8_t*>(device) + 6300;
+            const uint8_t* payload = static_cast<const uint8_t*>(device) + 6300;
             if (payload[0] == 0x3f) {
-                std::memcpy(latest.slider, payload, sizeof(latest.slider));
+                if (std::memcmp(latest.slider, payload, sizeof(latest.slider))) {
+                    std::memcpy(latest.slider, payload, sizeof(latest.slider));
+                    PublishLedData();
+                }
                 ++packCount;
-                PublishLedData();
             }
         }
     }
@@ -54,7 +56,10 @@ uint64_t __fastcall SetOutputHook(void* state, int id, char on) {
     const auto result = originalSetOutput(state, id, on);
     ObserveLedOutput(state, id, on);
     if (active && state && id >= 0 && id < 22) {
-        std::memcpy(&latest.io3_bitmap, static_cast<uint8_t*>(state) + 216, sizeof(latest.io3_bitmap));
+        if (std::memcmp(&latest.io3_bitmap, static_cast<uint8_t*>(state) + 216, sizeof(latest.io3_bitmap))) {
+            std::memcpy(&latest.io3_bitmap, static_cast<uint8_t*>(state) + 216, sizeof(latest.io3_bitmap));
+            PublishLedData();
+        }
         ++ioCount;
     }
     return result;
